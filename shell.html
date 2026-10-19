@@ -1,0 +1,57 @@
+<div class="app">
+  <aside>
+    <a class="brand" href="#"
+      ><span class="brandmark">s</span> saldo<span class="branddot">.</span></a
+    >
+    <div class="workspace">PERSONAL WORKSPACE</div>
+    <nav>
+      <button data-view="budget" class="active">
+        <span>▦</span> Monthly budget</button
+      ><button data-view="accounts"><span>▤</span> Accounts & routes</button
+      ><button data-view="settings"><span>⚙</span> Plan settings</button>
+    </nav>
+    <div class="aside-bottom">
+      <div class="privacy-dot"></div>
+      Yours, and only yours.
+      <p>Private cloud budget.<br />No bank connection required.</p>
+      <button id="export" class="text-button">↓ Export backup</button
+      ><label class="import-label"
+        >↑ Import backup<input
+          type="file"
+          id="import"
+          accept="application/json"
+          hidden
+      /></label>
+    </div>
+    <div class="profile">
+      <span>Z</span>
+      <div>Your workspace<small>Personal budget</small></div>
+    </div>
+  </aside>
+  <main>
+    <header>
+      <div class="breadcrumb">
+        Workspace <span>/</span> <b id="page-name">Monthly budget</b>
+      </div>
+      <div class="header-right">
+        <span id="save-status">Connecting to cloud…</span
+        ><button id="month-prev" class="icon" aria-label="Previous month">
+          ‹</button
+        ><input type="month" id="month" aria-label="Budget month" /><button
+          id="month-next"
+          class="icon"
+          aria-label="Next month"
+        >
+          ›
+        </button>
+      </div>
+    </header>
+    <div id="content"></div>
+    <footer>
+      <span>LESS GUESSWORK. MORE PEACE OF MIND.</span
+      ><span>Made for your real life.</span>
+    </footer>
+  </main>
+</div>
+<dialog id="modal"><div id="modal-content"></div></dialog>
+<div id="toast" role="status"></div>

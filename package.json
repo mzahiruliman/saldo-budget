@@ -1,0 +1,6 @@
+{
+ "name":"saldo-budget","version":"2.0.0","private":true,"description":"Private monthly budgeting with GitHub Pages and Supabase",
+ "scripts":{"build":"node build.cjs","start":"node preview.cjs","test":"node --test '*.test.mjs'","test:ui":"playwright test"},
+ "repository":{"type":"git","url":"https://github.com/mzahiruliman/saldo-budget.git"},"license":"UNLICENSED",
+ "dependencies":{"@supabase/supabase-js":"2.118.0"},"devDependencies":{"@playwright/test":"1.64.1","esbuild":"0.28.2"}
+}

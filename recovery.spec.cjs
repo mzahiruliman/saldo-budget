@@ -1,0 +1,6 @@
+const {test,expect}=require('@playwright/test');
+test('recovered pending draft resumes cloud save after revision check (simulated HTTP)',async({page})=>{
+ const {initialState}=await import('./model.mjs');const payload=initialState();payload.months[payload.selected].salary=54321;
+ await page.addInitScript(({payload})=>{const id='11111111-1111-4111-8111-111111111111';const jwt=btoa('{}')+'.'+btoa(JSON.stringify({sub:id,role:'authenticated',exp:2100000000}))+'.synthetic';localStorage.setItem('saldo-cloud-connection-v1','sb_publishable_SYNTHETIC_BROWSER_TEST_ONLY');localStorage.setItem('sb-cxezfmlzvyodmjxtjtzb-auth-token',JSON.stringify({access_token:jwt,refresh_token:'synthetic',token_type:'bearer',expires_at:2100000000,expires_in:3600,user:{id,aud:'authenticated',app_metadata:{},user_metadata:{}}}));localStorage.setItem('saldo-cloud-draft-'+id,JSON.stringify({payload,revision:0,dirty:true}))},{payload});
+ let writes=0;await page.route('https://cxezfmlzvyodmjxtjtzb.supabase.co/**',async r=>{if(r.request().url().includes('/rpc/save_budget')){writes++;await r.fulfill({json:[{user_id:'11111111-1111-4111-8111-111111111111',payload:r.request().postDataJSON().p_payload,revision:1}]})}else await r.fulfill({json:[]})});await page.goto('/saldo-budget/');await expect(page.locator('#save-status')).toContainText('Saved to cloud');expect(writes).toBe(1);
+});
