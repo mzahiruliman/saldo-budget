@@ -21,7 +21,7 @@ const $ = (s) => document.querySelector(s),
           "'": "&#39;",
         })[c],
     );
-export function mountBudget({ initial, onChange }) {
+export function mountBudget({ initial, onChange, onView = () => {} }) {
   const root = document.querySelector("#workspace");
   const $ = s => root.querySelector(s);
   let alive = true, toastTimer;
@@ -80,7 +80,9 @@ export function mountBudget({ initial, onChange }) {
         ? "Monthly budget"
         : view === "accounts"
           ? "Accounts & routes"
-          : "Plan settings";
+          : view === "activity" ? "Activity" : "Plan settings";
+    onView(view, state);
+    if (view === "activity") return;
     if (view !== "budget") {
       renderOther();
       return;

@@ -1,18 +1,23 @@
 import { validateState } from "./model.mjs";
-import { createClient } from '@supabase/supabase-js';
+import { createClient } from "@supabase/supabase-js";
+export function ownerClient(client, userId, connection) {
+  if (!connection) return client;
+  return createClient(connection.url, connection.key, {
+    accessToken: async () => {
+      const { data, error } = await client.auth.getSession();
+      if (
+        error ||
+        data.session?.user.id !== userId ||
+        !data.session.access_token
+      )
+        throw new Error("Session changed. Reopen your budget before saving.");
+      return data.session.access_token;
+    },
+    global: { fetch: connection.fetch || ((...args) => fetch(...args)) },
+  });
+}
 export function budgetApi(client, userId, connection) {
-  if (connection) {
-    const authClient = client;
-    client = createClient(connection.url, connection.key, {
-      accessToken: async () => {
-        const { data, error } = await authClient.auth.getSession();
-        if (error || data.session?.user.id !== userId || !data.session.access_token)
-          throw new Error('Session changed. Reopen your budget before saving.');
-        return data.session.access_token;
-      },
-      global: { fetch: connection.fetch || ((...args) => fetch(...args)) },
-    });
-  }
+  client = ownerClient(client, userId, connection);
   function check(row) {
     if (!row) return null;
     if (row.user_id !== userId)

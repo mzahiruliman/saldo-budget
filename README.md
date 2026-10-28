@@ -6,6 +6,14 @@ Responsive monthly budget planner for GitHub Pages + Supabase Auth/Postgres. Thi
 
 The app and database migration are provided for deployment. Local automated tests are separate from a successful live Supabase/GitHub OAuth deployment. No cloud account credentials are included. Nothing in this package automatically publishes a site or changes a live database.
 
+## Activity and iPhone Shortcuts upgrade
+
+The new **Activity** view records Income, Expense and own-account Transfer separately from the monthly plan. It supports explicit Unassigned income/expense, later account assignment, voiding, full-history transaction export and revocable per-device Shortcut credentials. Recorded account movement is not a verified bank balance. Neither transactions nor retries rewrite planned salary, Ibu, item amounts or paid flags.
+
+For an existing installation, follow **[TRACKER-DEPLOYMENT.md](TRACKER-DEPLOYMENT.md)** after release approval. Apply the additive migration and deploy the restricted endpoint before merging the rebuilt frontend. Do not rerun old import steps or replace the current budget with fixtures. Build the private Shortcut using **[SHORTCUTS.md](SHORTCUTS.md)**; a pre-signed importable iPhone Shortcut is not supplied.
+
+Plan backups and Activity transaction exports are **separate**. Export both; neither contains device credentials. The current app does not have a transaction-JSON restore UI.
+
 ## Deploy after creating your GitHub OAuth / Supabase project
 
 1. Export a backup from your original local Saldo. Keep it private.
@@ -25,7 +33,7 @@ If you see missing-table/function errors, verify step 2. For redirect errors, ve
 - Pending edits are cached under a user-specific key in this browser. The cache and exported JSON are **not encrypted**. Use a trusted device.
 - If the network fails, the app keeps the draft and reports **Not saved to cloud**. **Retry cloud save** first establishes the remote revision and then retries; it does not blindly overwrite the cloud.
 - A stale revision produces a conflict, not last-write-wins. Export your draft if needed, then **Load latest** to discard the draft explicitly. Reapply wanted edits to the newest version.
-- This version loads on sign-in/open and with **Load latest**; it is not continuous realtime co-editing. Keep one editor active at a time when possible.
+- The monthly **plan** loads on sign-in/open and with **Load latest**; it is not continuous realtime co-editing. Activity has a separate authenticated Realtime subscription and reconnect refresh that never reloads the whole plan. Keep one editor active at a time when possible.
 - Signing out clears the displayed budget. Discarding an unsaved draft to sign out requires confirmation; export first. Cloud records remain intact.
 - Keep periodic JSON backups, especially before migration or replacing the app. The original portable edition stays independent and is not changed by this deployment.
 
@@ -43,7 +51,7 @@ npm run build
 npm start
 ```
 
-Open `http://127.0.0.1:5174/saldo-budget/` to test the same repository subpath as Pages. For local real OAuth testing, add that exact local callback URL to Supabase's allowed redirects. Never put secrets in configuration files.
+Open `http://127.0.0.1:5175/saldo-budget/` to test the same repository subpath as Pages. For local real OAuth testing, add that exact local callback URL to Supabase's allowed redirects. Never put secrets in configuration files.
 
 ```sh
 npm test
@@ -52,6 +60,8 @@ npm run test:ui
 ```
 
 Browser integration tests explicitly use synthetic sessions and simulated Supabase HTTP responses; they exercise the real UI, Supabase JS SDK, and sync engine but do **not** prove your live OAuth settings. The database tests use real local PostgreSQL; see `DATABASE-VERIFICATION.md` for instructions and the isolation/concurrency checks performed.
+
+Additional tracker checks: `/usr/bin/python3 tracker-db-test.py`, optional `/usr/bin/python3 tracker-http-test.py` (requires local PostgREST), and `deno check supabase/functions/shortcut-entry/index.ts`. See `TRACKER-DATABASE-VERIFICATION.md` and `TRACKER-HTTP-VERIFICATION.md` for the precise local test boundaries. No local test proves live OAuth or an installed iPhone Shortcut.
 
 The public key can optionally be embedded into `config.mjs` for one-step end-user access; rebuild and upload `docs` afterward. Only a **publishable** key is allowed in a public frontend. The shipped default leaves it empty and asks each browser for it.
 

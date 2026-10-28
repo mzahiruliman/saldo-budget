@@ -4,12 +4,16 @@ import { initialState, validateState } from "./model.mjs";
 import { mountBudget } from "./budget-ui.mjs";
 import { SyncEngine } from "./sync-engine.mjs";
 import { budgetApi } from "./supabase-api.mjs";
+import { createTrackerApi } from "./tracker-api.mjs";
+import { mountActivity } from "./activity-ui.mjs";
 import shell from "./shell.html";
 const $ = (s) => document.querySelector(s),
   CONFIG_KEY = "saldo-cloud-connection-v1";
 let client = null,
   engine = null,
   ui = null,
+  activity = null,
+  tracker = null,
   currentUser = null,
   generation = 0;
 function frame(content) {
@@ -95,6 +99,10 @@ function showStatus(state) {
 function clearWorkspace() {
   generation++;
   engine?.stop();
+  activity?.destroy();
+  tracker?.destroy();
+  activity = null;
+  tracker = null;
   ui?.destroy();
   engine = null;
   ui = null;
@@ -121,7 +129,7 @@ async function openSession(session) {
   const tools = document.createElement("section");
   tools.id = "cloud-tools";
   tools.innerHTML =
-    '<span id="cloud-message">Loading cloud budget…</span><button id="retry-cloud" hidden>Retry cloud save</button><button id="reload-cloud">Load latest</button><button id="cloud-export">Export backup</button><button id="signout">Sign out</button>';
+    '<span id="cloud-message">Loading cloud budget…</span><button id="retry-cloud" hidden>Retry cloud save</button><button id="reload-cloud">Load latest</button><button id="cloud-export">Export plan backup</button><button id="signout">Sign out</button>';
   main.insertBefore(tools, main.firstChild);
   const welcome = document.createElement("div");
   welcome.className = "cloud-onboarding";
@@ -129,18 +137,39 @@ async function openSession(session) {
     "Moving from the original app? Import your latest JSON backup in Plan settings. Keep a separate backup until you verify it on your other device. Changes save after acknowledgement from the cloud.";
   main.insertBefore(welcome, $("#content"));
   let sessionEngine;
-  const sessionUI = ui = mountBudget({
+  const sessionTracker = (tracker = createTrackerApi(client, userId, {
+    url: config.url,
+    key,
+  }));
+  const sessionUI = (ui = mountBudget({
     initial: initialState(),
-    onChange: (payload) => {
-      if (turn === generation && currentUser === userId) sessionEngine?.change(payload);
+    onView: (view) => {
+      if (turn !== generation || currentUser !== userId) return;
+      if (view !== "activity") {
+        activity?.hide();
+        return;
+      }
+      if (!activity)
+        activity = mountActivity({
+          root: $("#content"),
+          api: sessionTracker,
+          getBudget: () => sessionUI.getState(),
+          userId,
+          functionUrl: config.url + "/functions/v1/shortcut-entry",
+        });
+      void activity.open();
     },
-  });
+    onChange: (payload) => {
+      if (turn === generation && currentUser === userId)
+        sessionEngine?.change(payload);
+    },
+  }));
   sessionEngine = engine = new SyncEngine({
     api: budgetApi(client, userId, { url: config.url, key }),
     initial: initialState(),
     storage: localStorage,
     cacheKey: `saldo-cloud-draft-${userId}`,
-    validatePayload: payload => validateState(payload).valid,
+    validatePayload: (payload) => validateState(payload).valid,
     onData: (payload) => {
       if (turn !== generation) return;
       if (!validateState(payload).valid)
@@ -155,7 +184,9 @@ async function openSession(session) {
   });
   $("#cloud-export").onclick = () => ui.exportBackup();
   $("#retry-cloud").onclick = () =>
-    sessionEngine.loaded ? sessionEngine.flush() : sessionEngine.start().then(() => sessionEngine.flush());
+    sessionEngine.loaded
+      ? sessionEngine.flush()
+      : sessionEngine.start().then(() => sessionEngine.flush());
   $("#reload-cloud").onclick = () => {
     const load = () => sessionEngine.reloadRemote();
     if (engine.dirty || engine.status === "conflict") askDiscard(load);
@@ -174,8 +205,9 @@ async function openSession(session) {
     }
     await doSignOut();
   };
-  try { await sessionEngine.start(); }
-  catch (error) {
+  try {
+    await sessionEngine.start();
+  } catch (error) {
     if (turn !== generation) return;
     throw error;
   }
@@ -186,7 +218,9 @@ async function doSignOut() {
   const { error } = await client.auth.signOut({ scope: "local" });
   if (turn !== generation || uid !== currentUser) {
     if (!error) {
-      try { localStorage.removeItem(`saldo-cloud-draft-${uid}`); } catch {}
+      try {
+        localStorage.removeItem(`saldo-cloud-draft-${uid}`);
+      } catch {}
     }
     return;
   }

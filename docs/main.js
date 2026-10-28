@@ -21049,7 +21049,8 @@ var esc = (v) => String(v ?? "").replace(
     "'": "&#39;"
   })[c]
 );
-function mountBudget({ initial, onChange }) {
+function mountBudget({ initial, onChange, onView = () => {
+} }) {
   const root = document.querySelector("#workspace");
   const $2 = (s) => root.querySelector(s);
   let alive = true, toastTimer;
@@ -21089,7 +21090,9 @@ function mountBudget({ initial, onChange }) {
     const m = month(), s = summarize(m), totals = categoryTotals(m);
     $2("#month").value = state.selected;
     document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("active", b.dataset.view === view));
-    $2("#page-name").textContent = view === "budget" ? "Monthly budget" : view === "accounts" ? "Accounts & routes" : "Plan settings";
+    $2("#page-name").textContent = view === "budget" ? "Monthly budget" : view === "accounts" ? "Accounts & routes" : view === "activity" ? "Activity" : "Plan settings";
+    onView(view, state);
+    if (view === "activity") return;
     if (view !== "budget") {
       renderOther();
       return;
@@ -21612,19 +21615,20 @@ var SyncEngine = class {
 };
 
 // supabase-api.mjs
+function ownerClient(client2, userId, connection) {
+  if (!connection) return client2;
+  return createClient(connection.url, connection.key, {
+    accessToken: async () => {
+      const { data, error } = await client2.auth.getSession();
+      if (error || data.session?.user.id !== userId || !data.session.access_token)
+        throw new Error("Session changed. Reopen your budget before saving.");
+      return data.session.access_token;
+    },
+    global: { fetch: connection.fetch || ((...args) => fetch(...args)) }
+  });
+}
 function budgetApi(client2, userId, connection) {
-  if (connection) {
-    const authClient = client2;
-    client2 = createClient(connection.url, connection.key, {
-      accessToken: async () => {
-        const { data, error } = await authClient.auth.getSession();
-        if (error || data.session?.user.id !== userId || !data.session.access_token)
-          throw new Error("Session changed. Reopen your budget before saving.");
-        return data.session.access_token;
-      },
-      global: { fetch: connection.fetch || ((...args) => fetch(...args)) }
-    });
-  }
+  client2 = ownerClient(client2, userId, connection);
   function check(row) {
     if (!row) return null;
     if (row.user_id !== userId)
@@ -21660,8 +21664,789 @@ function budgetApi(client2, userId, connection) {
   };
 }
 
+// tracker-model.mjs
+function monthBounds(month) {
+  if (!/^\d{4}-(0[1-9]|1[0-2])$/.test(month)) throw new Error("Invalid month.");
+  const [y, m] = month.split("-").map(Number);
+  const end = m === 12 ? `${y + 1}-01-01` : `${String(y).padStart(4, "0")}-${String(m + 1).padStart(2, "0")}-01`;
+  return { start: month + "-01", end };
+}
+function entryMonth(entry) {
+  const date = entry.entry_date;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date || ""))
+    throw new Error("Entry date is missing.");
+  const parsed = /* @__PURE__ */ new Date(date + "T00:00:00Z");
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== date)
+    throw new Error("Invalid entry date.");
+  return date.slice(0, 7);
+}
+function parseAmount(value) {
+  const text2 = String(value).trim();
+  if (!/^\d+(?:\.\d{1,2})?$/.test(text2))
+    throw new Error("Enter a positive amount with at most two decimal places.");
+  const [whole, fraction = ""] = text2.split(".");
+  const cents2 = BigInt(whole) * 100n + BigInt(fraction.padEnd(2, "0"));
+  if (cents2 <= 0n || cents2 > 10000000000n)
+    throw new Error("Amount is outside the supported range.");
+  return Number(cents2);
+}
+
+// tracker-api.mjs
+function createTrackerApi(authClient, userId, connection) {
+  const client2 = ownerClient(authClient, userId, connection);
+  let active = true;
+  const stops = /* @__PURE__ */ new Set();
+  const check = () => {
+    if (!active) throw new Error("Session ended. Reopen Activity.");
+  };
+  const row = (r) => {
+    if (!r || r.user_id !== userId)
+      throw new Error("Transaction owner mismatch.");
+    if (!["income", "expense", "transfer"].includes(r.type) || !Number.isSafeInteger(r.amount_cents) || r.amount_cents <= 0 || r.amount_cents > 1e10 || r.currency !== "MYR")
+      throw new Error("Invalid transaction response.");
+    entryMonth(r);
+    return r;
+  };
+  async function rpc(name, args = {}) {
+    check();
+    const { data, error } = await client2.rpc(name, args);
+    check();
+    if (error) throw new Error(error.message || "Tracker request failed");
+    return data;
+  }
+  const checkedCursor = (cursor) => {
+    if (!cursor || typeof cursor.id !== "string" || !/^[a-fA-F0-9]{8}-(?:[a-fA-F0-9]{4}-){3}[a-fA-F0-9]{12}$/.test(cursor.id) || typeof cursor.occurred_at !== "string" || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(cursor.occurred_at) || !Number.isFinite(Date.parse(cursor.occurred_at))) throw new Error("Invalid history cursor");
+    return { occurred_at: cursor.occurred_at, id: cursor.id };
+  };
+  async function page(month, cursor = null) {
+    check();
+    const { start, end } = monthBounds(month);
+    let query = client2.from("transactions").select("*", { count: "exact" }).eq("user_id", userId).gte("entry_date", start).lt("entry_date", end);
+    if (cursor !== null) {
+      const c = checkedCursor(cursor);
+      query = query.or(`occurred_at.lt.${c.occurred_at},and(occurred_at.eq.${c.occurred_at},id.lt.${c.id})`);
+    }
+    const { data, error, count } = await query.order("occurred_at", { ascending: false }).order("id", { ascending: false }).range(0, 50);
+    check();
+    if (error) throw new Error(error.message || "History load failed");
+    if (!Array.isArray(data)) throw new Error("Invalid history response");
+    data.forEach(row);
+    const entries = data.slice(0, 50), hasMore = Number.isSafeInteger(count) ? count > entries.length : data.length > 50;
+    return { entries, hasMore, nextCursor: hasMore ? checkedCursor(entries.at(-1)) : null };
+  }
+  return {
+    metadata: () => rpc("tracker_metadata"),
+    subscribe(callback, onStatus = () => {
+    }) {
+      check();
+      let stopped = false;
+      const channel = client2.channel("saldo-transactions-" + userId + "-" + crypto.randomUUID()).on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "transactions",
+          filter: "user_id=eq." + userId
+        },
+        () => {
+          if (active && !stopped) callback();
+        }
+      );
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        stops.delete(stop);
+        Promise.resolve(client2.removeChannel(channel)).catch(() => {
+        });
+      };
+      stops.add(stop);
+      channel.subscribe((status) => {
+        if (!active || stopped) return;
+        onStatus(status);
+        if (status === "SUBSCRIBED") callback();
+      });
+      return stop;
+    },
+    async exportAll() {
+      const rows = await rpc("export_transactions");
+      if (!Array.isArray(rows)) throw new Error("Invalid export response");
+      return rows.map(row);
+    },
+    async devices() {
+      const list = await rpc("list_shortcut_devices");
+      if (!Array.isArray(list)) throw new Error("Invalid device list");
+      return list.map(
+        (d) => Object.fromEntries(
+          [
+            "id",
+            "name",
+            "time_zone",
+            "expires_at",
+            "revoked_at",
+            "last_used_at",
+            "created_at"
+          ].map((k) => [k, d[k]])
+        )
+      );
+    },
+    async mint({ name, timeZone, days }) {
+      check();
+      name = String(name || "").trim();
+      if (!name || name.length > 80 || !Number.isInteger(days) || days < 1 || days > 365)
+        throw new Error("Enter a device name and expiry from 1\u2013365 days");
+      new Intl.DateTimeFormat("en", { timeZone }).format();
+      const bytes = crypto.getRandomValues(new Uint8Array(32));
+      const token = "sld_" + btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=/g, "");
+      const digest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(token)
+      );
+      check();
+      const hash = Array.from(
+        new Uint8Array(digest),
+        (x) => x.toString(16).padStart(2, "0")
+      ).join("");
+      const device = await rpc("create_shortcut_device", {
+        p_name: name,
+        p_token_hash: hash,
+        p_time_zone: timeZone,
+        p_expires_in_days: days
+      });
+      if (!device?.id) throw new Error("Device creation was not acknowledged");
+      return { device, token };
+    },
+    async revoke(id) {
+      const result = await rpc("revoke_shortcut_device", { p_device_id: id });
+      if (typeof result !== "boolean")
+        throw new Error("Device revocation was not acknowledged");
+      return result;
+    },
+    list: page,
+    async create(entry) {
+      if (!entry || !Number.isSafeInteger(entry.amount_cents) || entry.amount_cents <= 0 || entry.amount_cents > 1e10 || !["income", "expense", "transfer"].includes(entry.type))
+        throw new Error("Invalid transaction");
+      const result = await rpc("record_transaction", {
+        p_entry: structuredClone(entry)
+      });
+      if (typeof result?.duplicate !== "boolean")
+        throw new Error("Save was not acknowledged");
+      row(result.transaction);
+      return result;
+    },
+    async assign(id, { accountId, category = null }) {
+      if (typeof accountId !== "string" || !accountId)
+        throw new Error("Choose an owned account");
+      return row(
+        await rpc("assign_transaction", {
+          p_transaction_id: id,
+          p_account_id: accountId,
+          p_category: category
+        })
+      );
+    },
+    async void(id) {
+      const result = await rpc("void_transaction", { p_transaction_id: id });
+      row(result);
+      if (!result.voided_at) throw new Error("Void was not acknowledged");
+      return result;
+    },
+    async summary(month) {
+      monthBounds(month);
+      const data = await rpc("tracker_summary", { p_month: month });
+      for (const key2 of ["income_cents", "expense_cents", "transfer_cents"])
+        if (!Number.isSafeInteger(data?.[key2]))
+          throw new Error("Invalid summary response");
+      return data;
+    },
+    destroy() {
+      active = false;
+      for (const stop of [...stops]) stop();
+      stops.clear();
+    }
+  };
+}
+
+// activity-ui.mjs
+function mountActivity({ root, api, getBudget, functionUrl = "", userId }) {
+  let visible = false, destroyed = false, generation2 = 0, historyRequest = 0;
+  let view, summaryBox, historyBox, form, pageEntries = [], hasMore = false, pageCursor = null, month;
+  let metadata = { accounts: [], categories: [] };
+  let pending = null, saving = false, connection = "Connecting to transaction updates\u2026";
+  const assignmentDrafts = /* @__PURE__ */ new Map();
+  const timeZone = () => Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const beforeUnload = (event) => {
+    if (pending) {
+      event.preventDefault();
+      event.returnValue = "";
+    }
+  };
+  window.addEventListener("beforeunload", beforeUnload);
+  const alive = (owner) => visible && !destroyed && owner === generation2 && root.contains(view);
+  const node = (tag, text2, className) => {
+    const el = document.createElement(tag);
+    if (text2 !== void 0) el.textContent = text2;
+    if (className) el.className = className;
+    return el;
+  };
+  const accountList = () => (getBudget().accounts || []).filter((a) => !["recipient", "external"].includes(a.kind || a.type));
+  const accountName = (id, snapshot) => id ? [...accountList(), ...metadata.accounts].find((a) => a.id === id)?.name || snapshot || id : "Unassigned";
+  function error(target, prefix, exception) {
+    target.replaceChildren(node("p", `${prefix}: ${exception?.message || "Please try again."}`, "activity-error"));
+  }
+  function accountSelect(select, unassigned) {
+    select.replaceChildren();
+    if (unassigned) select.append(new Option("Unassigned", ""));
+    for (const a of accountList()) select.append(new Option(a.name, a.id));
+    select.required = !unassigned;
+  }
+  function renderSummary(summary) {
+    summaryBox.replaceChildren();
+    for (const [label, key2] of [["Income", "income_cents"], ["Expense", "expense_cents"], ["Transfer", "transfer_cents"]]) {
+      const card = node("div", void 0, "activity-stat");
+      card.append(node("span", label), node("strong", money(summary[key2])));
+      summaryBox.append(card);
+    }
+    const details = node("div", void 0, "activity-movements");
+    details.append(node("h3", "Account net movement"), node("p", "Recorded movement only \u2014 not a bank balance. No dated opening balance has been provided."));
+    const unassigned = (summary.unassigned_income_cents || 0) + (summary.unassigned_expense_cents || 0);
+    if (unassigned) details.append(node("p", `Unassigned \xB7 income ${money(summary.unassigned_income_cents || 0)} \xB7 expense ${money(summary.unassigned_expense_cents || 0)}`, "activity-badge"));
+    const movements = summary.movements || {};
+    for (const [id, delta] of Object.entries(movements)) details.append(node("p", `${accountName(id)} \xB7 ${money(delta)}`));
+    if (!Object.keys(movements).length) details.append(node("p", "No account movement recorded."));
+    summaryBox.append(details);
+  }
+  function renderAssignment(entry, owner) {
+    const draft = assignmentDrafts.get(entry.id), row = node("tr", void 0, "activity-assignment-row");
+    const cell = node("td");
+    cell.colSpan = 8;
+    const editor = node("form", void 0, "activity-form");
+    const accountLabel = node("label", "Assign owned account"), select = node("select");
+    select.setAttribute("aria-label", "Assign owned account");
+    accountSelect(select, false);
+    select.prepend(new Option("Choose an account", ""));
+    select.value = draft.accountId;
+    select.onchange = () => {
+      if (alive(owner)) draft.accountId = select.value;
+    };
+    accountLabel.append(select);
+    editor.append(accountLabel);
+    let category;
+    if (entry.type === "expense") {
+      const label = node("label", "Assignment category");
+      category = node("select");
+      category.setAttribute("aria-label", "Assignment category");
+      for (const [id, name] of [["", "No category"], ["commitment", "Commitment"], ["entertainment", "Entertainment"], ["savings", "Savings"]]) category.append(new Option(name, id));
+      category.value = draft.category;
+      category.onchange = () => {
+        if (alive(owner)) draft.category = category.value;
+      };
+      label.append(category);
+      editor.append(label);
+    }
+    const message = node("p", draft.error || "Resolve the unknown owned side only. To correct an existing route, void the entry and record a new one.", draft.error ? "activity-error activity-wide" : "activity-wide");
+    message.setAttribute("role", "status");
+    const submit = node("button", "Confirm assignment");
+    submit.type = "submit";
+    submit.className = "primary";
+    const cancel = node("button", "Cancel assignment");
+    cancel.type = "button";
+    cancel.onclick = () => {
+      if (alive(owner) && !draft.busy) {
+        assignmentDrafts.delete(entry.id);
+        renderHistory();
+      }
+    };
+    editor.append(message, submit, cancel);
+    for (const control of editor.elements) control.disabled = draft.busy;
+    editor.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!alive(owner) || draft.busy || !editor.reportValidity()) return;
+      if (!accountList().some((a) => a.id === select.value)) {
+        draft.error = "Choose one of your current owned accounts.";
+        renderHistory();
+        return;
+      }
+      const details = { accountId: select.value, category: entry.type === "expense" ? category.value || null : null };
+      draft.busy = true;
+      draft.error = "";
+      for (const control of editor.elements) control.disabled = true;
+      message.textContent = "Assigning recorded entry\u2026";
+      try {
+        await api.assign(entry.id, details);
+        if (!alive(owner)) return;
+        assignmentDrafts.delete(entry.id);
+        await refresh();
+      } catch (exception) {
+        if (!alive(owner)) return;
+        draft.busy = false;
+        draft.error = `Unable to assign account: ${exception?.message || "Try again."}`;
+        renderHistory();
+      }
+    };
+    cell.append(editor);
+    row.append(cell);
+    return row;
+  }
+  function renderHistory() {
+    const owner = generation2;
+    historyBox.replaceChildren(node("h2", "Transaction history"), node("p", "Totals cover all recorded entries. Load more adds older rows; Refresh activity loads new entries."));
+    if (!pageEntries.length) historyBox.append(node("p", "No recorded transactions for this month."));
+    else {
+      const table = node("table");
+      const head2 = node("thead"), row = node("tr");
+      const columns = ["Date", "Type", "From \u2192 To", "External party", "Category", "Amount", "Status / source", "Action"];
+      for (const label of columns) row.append(node("th", label));
+      head2.append(row);
+      table.append(head2);
+      const body = node("tbody");
+      for (const entry of pageEntries) {
+        const tr = node("tr");
+        tr.dataset.entry = entry.id;
+        const from = entry.type === "income" ? entry.external_party || "External party" : accountName(entry.from_account_id, entry.from_account_name);
+        const to = entry.type === "expense" ? entry.external_party || "External party" : accountName(entry.to_account_id, entry.to_account_name);
+        const values = [new Date(entry.occurred_at).toLocaleString(), entry.type, `${from} \u2192 ${to}`, entry.external_party || "\u2014", entry.category || "\u2014", money(entry.amount_cents), `${entry.status || (entry.voided_at ? "void" : "active")} \xB7 ${entry.source || "manual"}`];
+        values.forEach((value, i) => {
+          const td = node("td", value);
+          td.dataset.label = columns[i];
+          tr.append(td);
+        });
+        const action = node("td");
+        action.dataset.label = "Action";
+        if (!entry.voided_at && !["void", "voided"].includes(entry.status)) {
+          const button = node("button", "Void");
+          button.type = "button";
+          button.dataset.void = entry.id;
+          const owner2 = generation2;
+          button.onclick = async () => {
+            if (!alive(owner2) || button.disabled || !window.confirm("Void this recorded transaction? This removes its effect on actual totals only. Your plan and paid flags will not change.")) return;
+            button.disabled = true;
+            try {
+              await api.void(entry.id);
+              if (alive(owner2)) await refresh();
+            } catch (exception) {
+              if (alive(owner2)) {
+                button.disabled = false;
+                action.append(node("p", `Unable to void: ${exception?.message || "Try again."}`, "activity-error"));
+              }
+            }
+          };
+          button.disabled = assignmentDrafts.get(entry.id)?.busy || false;
+          action.append(button);
+          if (entry.type === "income" && !entry.to_account_id || entry.type === "expense" && !entry.from_account_id) {
+            const assign = node("button", "Assign account");
+            assign.type = "button";
+            assign.disabled = assignmentDrafts.has(entry.id);
+            assign.onclick = () => {
+              if (!alive(owner2) || assignmentDrafts.has(entry.id)) return;
+              assignmentDrafts.set(entry.id, { accountId: "", category: entry.category || "", busy: false, error: "" });
+              renderHistory();
+            };
+            action.append(assign);
+          }
+        }
+        tr.append(action);
+        body.append(tr);
+        if (assignmentDrafts.has(entry.id) && !entry.voided_at && !["void", "voided"].includes(entry.status)) body.append(renderAssignment(entry, owner));
+      }
+      table.append(body);
+      historyBox.append(table);
+    }
+    if (hasMore) {
+      const more = node("button", "Load more");
+      more.type = "button";
+      more.onclick = () => {
+        if (alive(owner)) void loadHistory(true);
+      };
+      historyBox.append(more);
+    }
+  }
+  async function loadHistory(more = false) {
+    if (!visible || destroyed) return;
+    const owner = generation2, request = ++historyRequest;
+    if (more) historyBox.querySelectorAll("button").forEach((b) => {
+      b.disabled = true;
+    });
+    else {
+      historyBox.replaceChildren(node("p", "Loading transactions\u2026"));
+      summaryBox.replaceChildren(node("p", "Loading actual totals\u2026"));
+    }
+    try {
+      const [page, summary] = await Promise.all([api.list(month, more ? pageCursor : null), api.summary(month)]);
+      if (!alive(owner) || request !== historyRequest) return;
+      pageEntries = more ? [...pageEntries, ...page.entries] : page.entries;
+      hasMore = page.hasMore;
+      pageCursor = page.nextCursor || null;
+      renderSummary(summary);
+      renderHistory();
+    } catch (exception) {
+      if (!alive(owner) || request !== historyRequest) return;
+      if (more) {
+        renderHistory();
+        historyBox.append(node("p", `Unable to load more transactions: ${exception?.message || "Try again."}`, "activity-error"));
+      } else {
+        error(historyBox, "Unable to load transactions", exception);
+        summaryBox.replaceChildren(node("p", "Actual totals unavailable."));
+      }
+      const retry = node("button", "Retry history");
+      retry.onclick = () => {
+        if (alive(owner)) void loadHistory(more);
+      };
+      historyBox.append(retry);
+    }
+  }
+  function lockEntry(locked) {
+    for (const field of form.elements) field.disabled = locked;
+  }
+  function showPending(owner) {
+    if (!alive(owner)) return;
+    lockEntry(true);
+    const message = form.querySelector("[data-save-message]");
+    message.replaceChildren(node("p", "Save result uncertain. Do not recreate this entry: retry sends the same request ID and unchanged details. Leaving this page before acknowledgement may cause a duplicate if you record it again.", "activity-error"));
+    const retry = node("button", "Retry same entry");
+    retry.type = "button";
+    retry.disabled = saving;
+    retry.onclick = () => {
+      if (alive(owner)) void savePending(owner);
+    };
+    const discard = node("button", "Abandon uncertain entry");
+    discard.type = "button";
+    discard.disabled = saving;
+    discard.onclick = () => {
+      if (!alive(owner) || saving) return;
+      if (!window.confirm("This entry may already have been recorded. Abandoning it and recording again can cause a duplicate. Check transaction history first. Abandon the pending request?")) return;
+      pending = null;
+      lockEntry(false);
+      message.replaceChildren(node("p", "Pending request abandoned. Check history before recording again."));
+    };
+    message.append(retry, discard);
+  }
+  async function savePending(owner) {
+    if (!alive(owner) || !pending || saving) return;
+    saving = true;
+    lockEntry(true);
+    const message = form.querySelector("[data-save-message]");
+    message.replaceChildren(node("p", "Saving recorded entry\u2026"));
+    const payload = pending;
+    try {
+      const result = await api.create(payload);
+      if (!alive(owner)) return;
+      pending = null;
+      saving = false;
+      lockEntry(false);
+      message.replaceChildren(node("p", result.duplicate ? "This entry was already recorded. Existing transaction acknowledged; no second entry was created." : "Entry recorded. Your planned budget and paid flags are unchanged."));
+      form.elements.amount.value = "";
+      form.elements.note.value = "";
+      void refresh();
+    } catch (exception) {
+      if (!alive(owner)) return;
+      saving = false;
+      showPending(owner);
+      message.append(node("p", exception?.message || "Unable to confirm save.", "activity-error"));
+    }
+  }
+  function bindEntry(owner, updateType) {
+    const currentForm = form, fields = currentForm.elements;
+    if (pending) {
+      fields.type.value = pending.type;
+      updateType();
+      fields.from.value = pending.from_account_id || "";
+      fields.to.value = pending.to_account_id || "";
+      fields.external.value = pending.external_party;
+      fields.amount.value = String(pending.amount_cents / 100);
+      fields.category.value = pending.category || "";
+      fields.note.value = pending.note;
+      const date = new Date(pending.occurred_at);
+      fields.occurred.value = new Date(date.getTime() - date.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+      showPending(owner);
+    }
+    currentForm.onsubmit = (event) => {
+      event.preventDefault();
+      if (!alive(owner) || pending || saving || !currentForm.reportValidity()) return;
+      const message = currentForm.querySelector("[data-save-message]");
+      try {
+        const type = fields.type.value;
+        const from = type === "income" ? null : fields.from.value || null;
+        const to = type === "expense" ? null : fields.to.value || null;
+        const ids = new Set(accountList().map((a) => a.id));
+        if (from && !ids.has(from) || to && !ids.has(to)) throw new Error("Choose one of your current accounts.");
+        if (type === "transfer" && (!from || !to || from === to)) throw new Error("A transfer needs two different owned accounts.");
+        const amount = parseAmount(fields.amount.value);
+        if (!Number.isSafeInteger(amount) || amount <= 0 || amount > 1e10) throw new Error("Enter an amount between RM 0.01 and RM 100,000,000.");
+        if (fields.note.value.length > 500) throw new Error("Keep the note within 500 characters.");
+        const occurred = new Date(fields.occurred.value);
+        if (!Number.isFinite(occurred.getTime())) throw new Error("Choose a valid date and time.");
+        const payload = Object.freeze({ request_id: crypto.randomUUID(), type, amount_cents: amount, currency: "MYR", occurred_at: occurred.toISOString(), time_zone: timeZone(), from_account_id: from, to_account_id: to, external_party: type === "transfer" ? "" : fields.external.value.trim(), category: type === "expense" ? fields.category.value || null : null, note: fields.note.value.trim() });
+        if (!window.confirm(`Record ${type} of ${money(amount)}? This updates actual activity only, not your planned budget.`)) return;
+        pending = payload;
+        void savePending(owner);
+      } catch (exception) {
+        error(message, "Entry not saved", exception);
+      }
+    };
+  }
+  function mountPair(owner) {
+    const panel = node("section", void 0, "activity-panel");
+    panel.dataset.pair = "";
+    panel.innerHTML = `<h2>Pair Shortcuts</h2><p>A private device credential authorizes recording transactions for your account. It is not a project publishable key. Never share it, commit it, or put it in a budget backup.</p><p class="activity-endpoint" data-endpoint></p><ol><li>Generate a private token for this device and copy it now. It will not be shown again.</li><li>In Apple Shortcuts, add Get Contents of URL with method POST to the endpoint below.</li><li>Send the token in the Authorization header as Bearer TOKEN. Use a JSON body containing request_id (UUID), type, amount_cents (integer cents, so RM 1.23 is 123), currency (MYR), occurred_at (ISO timestamp), time_zone (IANA zone), from_account_id, to_account_id, external_party, category and note. Use null for an unknown owned account. Income has an external sender; expense has an external recipient; transfer needs two different owned IDs. Reuse the same request_id when retrying.</li><li>Test a small transaction, then check Activity. Revoke this credential if your device is lost.</li></ol><form class="activity-form"><label>Device name<input name="deviceName" maxlength="80" required value="My Shortcut"></label><label>Device time zone<input name="deviceZone" maxlength="100" required></label><label>Expires in days<input name="days" type="number" min="1" max="365" step="1" value="90" required></label><button type="submit">Generate private token</button></form><div data-pair-message aria-live="polite"></div><div data-token></div><h3>Paired devices</h3><div data-devices aria-live="polite"></div>`;
+    view.append(panel);
+    panel.querySelector("[data-endpoint]").textContent = functionUrl ? `Endpoint: ${functionUrl}` : "Endpoint is not configured. Ask the app owner to configure the tracker function URL.";
+    const ids = node("details", void 0, "activity-device");
+    ids.append(node("summary", "Owned account IDs for Shortcuts"));
+    for (const account of accountList()) ids.append(node("p", `${account.name} \xB7 ${account.id}`));
+    ids.append(node("p", "Fetch current metadata with GET ?action=metadata at the same endpoint using the private Bearer token. Do not use account names as IDs."));
+    panel.querySelector("ol").after(ids);
+    const pairForm = panel.querySelector("form"), fields = pairForm.elements;
+    fields.deviceZone.value = timeZone();
+    const devicesBox = panel.querySelector("[data-devices]"), message = panel.querySelector("[data-pair-message]"), tokenBox = panel.querySelector("[data-token]");
+    let deviceRequest = 0;
+    async function loadDevices() {
+      const request = ++deviceRequest;
+      devicesBox.replaceChildren(node("p", "Loading devices\u2026"));
+      try {
+        const devices = await api.devices();
+        if (!alive(owner) || request !== deviceRequest) return;
+        devicesBox.replaceChildren();
+        if (!devices.length) devicesBox.append(node("p", "No paired devices."));
+        for (const device of devices) {
+          const card = node("div", void 0, "activity-device");
+          const state = device.revoked_at ? "Revoked" : new Date(device.expires_at).getTime() <= Date.now() ? "Expired" : "Active";
+          card.append(node("strong", device.name), node("span", state, "activity-badge"));
+          const date = (value) => value ? new Date(value).toLocaleString() : "Never";
+          card.append(node("p", `${device.time_zone || "UTC"} \xB7 Created ${date(device.created_at)} \xB7 Expires ${date(device.expires_at)} \xB7 Last used ${date(device.last_used_at)}`));
+          if (!device.revoked_at) {
+            const revoke = node("button", `Revoke ${device.name}`);
+            revoke.type = "button";
+            revoke.onclick = async () => {
+              if (!alive(owner) || revoke.disabled || !window.confirm(`Revoke ${device.name}? Its Shortcuts will stop recording transactions.`)) return;
+              revoke.disabled = true;
+              try {
+                const revoked = await api.revoke(device.id);
+                if (!alive(owner)) return;
+                if (!revoked) throw new Error("Device was not revoked. Refresh the list and try again.");
+                await loadDevices();
+              } catch (exception) {
+                if (alive(owner)) {
+                  revoke.disabled = false;
+                  error(message, "Unable to revoke device", exception);
+                }
+              }
+            };
+            card.append(revoke);
+          }
+          devicesBox.append(card);
+        }
+      } catch (exception) {
+        if (!alive(owner) || request !== deviceRequest) return;
+        error(devicesBox, "Unable to list devices", exception);
+        const retry = node("button", "Retry devices");
+        retry.onclick = () => {
+          if (alive(owner)) void loadDevices();
+        };
+        devicesBox.append(retry);
+      }
+    }
+    pairForm.onsubmit = async (event) => {
+      event.preventDefault();
+      if (!alive(owner) || pairForm.querySelector("button").disabled || !pairForm.reportValidity()) return;
+      const name = fields.deviceName.value.trim(), zone = fields.deviceZone.value.trim(), days = Number(fields.days.value);
+      try {
+        if (!name) throw new Error("Enter a device name.");
+        new Intl.DateTimeFormat("en", { timeZone: zone });
+        if (!Number.isInteger(days) || days < 1 || days > 365) throw new Error("Choose between 1 and 365 days.");
+      } catch (exception) {
+        error(message, "Invalid pairing details", exception);
+        return;
+      }
+      const submit = pairForm.querySelector("button");
+      submit.disabled = true;
+      clearToken();
+      message.replaceChildren(node("p", "Generating private credential\u2026"));
+      try {
+        const result = await api.mint({ name, timeZone: zone, days });
+        if (!alive(owner)) return;
+        submit.disabled = false;
+        message.replaceChildren(node("p", "Copy this private credential now. It disappears when you leave Activity and cannot be retrieved again."));
+        const label = node("label", "Private device token"), textarea = node("textarea", void 0, "activity-token");
+        textarea.readOnly = true;
+        textarea.value = result.token;
+        textarea.rows = 3;
+        textarea.setAttribute("autocomplete", "off");
+        textarea.setAttribute("spellcheck", "false");
+        label.append(textarea);
+        tokenBox.append(label);
+        const copy2 = node("button", "Copy token");
+        copy2.type = "button";
+        copy2.onclick = async () => {
+          if (!alive(owner)) return;
+          try {
+            await navigator.clipboard.writeText(textarea.value);
+            if (alive(owner)) message.replaceChildren(node("p", "Token copied. Keep it private."));
+          } catch {
+            if (alive(owner)) message.replaceChildren(node("p", "Clipboard unavailable. Select and copy the private token manually.", "activity-error"));
+          }
+        };
+        const dismiss = node("button", "Dismiss token");
+        dismiss.type = "button";
+        dismiss.onclick = () => {
+          if (alive(owner)) {
+            textarea.value = "";
+            tokenBox.replaceChildren();
+          }
+        };
+        tokenBox.append(copy2, dismiss);
+        void loadDevices();
+      } catch (exception) {
+        if (!alive(owner)) return;
+        submit.disabled = false;
+        error(message, "Unable to confirm token generation; check the device list before retrying", exception);
+        void loadDevices();
+      }
+    };
+    void loadDevices();
+  }
+  function mountExport(owner) {
+    const panel = node("section", void 0, "activity-panel");
+    panel.append(node("h2", "Transaction export"), node("p", "Download all recorded transactions across every month. This is separate from your budget backup and never includes device tokens."));
+    const button = node("button", "Export all transactions (JSON)");
+    button.type = "button";
+    const message = node("div");
+    message.setAttribute("aria-live", "polite");
+    panel.append(button, message);
+    view.append(panel);
+    button.onclick = async () => {
+      if (!alive(owner) || button.disabled) return;
+      button.disabled = true;
+      message.replaceChildren(node("p", "Loading all transaction pages\u2026"));
+      try {
+        const entries = await api.exportAll();
+        if (!alive(owner)) return;
+        const blob = new Blob([JSON.stringify({ version: 1, kind: "saldo-transactions", entries }, null, 2)], { type: "application/json" });
+        const url = URL.createObjectURL(blob), link = node("a");
+        link.href = url;
+        link.download = "saldo-transactions.json";
+        link.hidden = true;
+        panel.append(link);
+        link.click();
+        link.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1e3);
+        message.replaceChildren(node("p", "Transaction JSON download requested. This is not a budget backup."));
+      } catch (exception) {
+        if (alive(owner)) error(message, "Unable to export transactions", exception);
+      } finally {
+        if (alive(owner)) button.disabled = false;
+      }
+    };
+  }
+  function clearToken() {
+    if (!view) return;
+    const tokenBox = view.querySelector("[data-token]");
+    if (tokenBox) {
+      for (const textarea of tokenBox.querySelectorAll("textarea")) textarea.value = "";
+      tokenBox.replaceChildren();
+    }
+  }
+  function refresh() {
+    if (!visible || destroyed) return Promise.resolve();
+    const selected = getBudget().selectedmonth || getBudget().selected;
+    if (selected !== month) return open();
+    return loadHistory();
+  }
+  async function open() {
+    if (destroyed) return;
+    clearToken();
+    saving = false;
+    assignmentDrafts.clear();
+    pageCursor = null;
+    pageEntries = [];
+    hasMore = false;
+    visible = true;
+    const owner = ++generation2;
+    ++historyRequest;
+    month = getBudget().selectedmonth || getBudget().selected;
+    view = node("section", void 0, "activity-view");
+    view.innerHTML = `<header class="activity-heading"><div><span class="activity-eyebrow">ACTIVITY</span><h1>Money tracker</h1><p>Actual money in and out, separate from your planned budget and paid flags.</p></div></header><p data-month></p><section class="activity-summary" data-summary aria-live="polite"></section><section class="activity-panel"><h2>New entry</h2><p>Record what happened. The editable date defaults to now, not the selected plan month.</p><form class="activity-form"><label>Type<select name="type" aria-label="Type"><option value="income">Income</option><option value="expense" selected>Expense</option><option value="transfer">Transfer</option></select></label><label data-from>From account<select name="from"></select></label><label data-to>To account<select name="to"></select></label><label data-external>External party<input name="external" maxlength="160" placeholder="Person, shop or other external party"></label><label>Amount (RM)<input name="amount" type="number" min="0.01" max="100000000" step="0.01" required inputmode="decimal"></label><label>Date and time<input name="occurred" type="datetime-local" required></label><label data-category>Category<select name="category"><option value="">No category</option><option value="commitment">Commitment</option><option value="entertainment">Entertainment</option><option value="savings">Savings</option></select></label><label class="activity-wide">Note<textarea name="note" maxlength="500" rows="2"></textarea></label><div class="activity-wide" data-save-message aria-live="polite"></div><button class="primary" type="submit">Save entry</button></form></section><section class="activity-panel" data-history aria-live="polite"></section>`;
+    root.replaceChildren(view);
+    const controls = node("div", void 0, "activity-actions");
+    const connectionLabel = node("p", connection);
+    connectionLabel.dataset.connection = "";
+    connectionLabel.setAttribute("role", "status");
+    const refreshButton = node("button", "Refresh activity");
+    refreshButton.type = "button";
+    refreshButton.onclick = () => {
+      if (alive(owner)) void refresh();
+    };
+    controls.append(refreshButton, connectionLabel);
+    view.querySelector("header").append(controls);
+    const metadataMessage = node("div");
+    metadataMessage.dataset.metadataMessage = "";
+    metadataMessage.setAttribute("aria-live", "polite");
+    metadataMessage.textContent = "Loading account metadata\u2026";
+    controls.after(metadataMessage);
+    view.querySelector("[data-month]").textContent = `Actual activity \xB7 ${month}`;
+    summaryBox = view.querySelector("[data-summary]");
+    historyBox = view.querySelector("[data-history]");
+    form = view.querySelector("form");
+    const fields = form.elements;
+    const now = /* @__PURE__ */ new Date();
+    fields.occurred.value = new Date(now.getTime() - now.getTimezoneOffset() * 6e4).toISOString().slice(0, 16);
+    const updateType = () => {
+      if (!alive(owner)) return;
+      const type = fields.type.value;
+      accountSelect(fields.from, type !== "transfer");
+      accountSelect(fields.to, type !== "transfer");
+      form.querySelector("[data-from]").hidden = type === "income";
+      form.querySelector("[data-to]").hidden = type === "expense";
+      fields.from.required = type === "transfer";
+      fields.to.required = type === "transfer";
+      form.querySelector("[data-external]").hidden = type === "transfer";
+      form.querySelector("[data-category]").hidden = type !== "expense";
+    };
+    fields.type.onchange = updateType;
+    updateType();
+    bindEntry(owner, updateType);
+    mountPair(owner);
+    mountExport(owner);
+    const history = loadHistory();
+    try {
+      const result = await api.metadata();
+      if (alive(owner)) {
+        metadata = result;
+        metadataMessage.replaceChildren();
+      }
+    } catch (exception) {
+      if (alive(owner)) error(metadataMessage, "Account metadata unavailable", exception);
+    }
+    await history;
+  }
+  function hide() {
+    if (destroyed || !visible) return;
+    clearToken();
+    visible = false;
+    saving = false;
+    ++generation2;
+    ++historyRequest;
+  }
+  const unsubscribe = api.subscribe(() => {
+    if (visible && !destroyed) void refresh();
+  }, (status) => {
+    if (destroyed) return;
+    connection = status === "SUBSCRIBED" ? "Connected to transaction updates" : ["CHANNEL_ERROR", "TIMED_OUT", "CLOSED"].includes(status) ? "Updates disconnected \u2014 use Refresh activity to check for new entries." : "Connecting to transaction updates\u2026";
+    if (visible && view && root.contains(view)) view.querySelector("[data-connection]").textContent = connection;
+  });
+  function destroy() {
+    if (destroyed) return;
+    hide();
+    destroyed = true;
+    pending = null;
+    metadata = { accounts: [], categories: [] };
+    window.removeEventListener("beforeunload", beforeUnload);
+    unsubscribe?.();
+  }
+  return { open, hide, refresh, destroy };
+}
+
 // shell.html
-var shell_default = '<div class="app">\n  <aside>\n    <a class="brand" href="#"\n      ><span class="brandmark">s</span> saldo<span class="branddot">.</span></a\n    >\n    <div class="workspace">PERSONAL WORKSPACE</div>\n    <nav>\n      <button data-view="budget" class="active">\n        <span>\u25A6</span> Monthly budget</button\n      ><button data-view="accounts"><span>\u25A4</span> Accounts & routes</button\n      ><button data-view="settings"><span>\u2699</span> Plan settings</button>\n    </nav>\n    <div class="aside-bottom">\n      <div class="privacy-dot"></div>\n      Yours, and only yours.\n      <p>Private cloud budget.<br />No bank connection required.</p>\n      <button id="export" class="text-button">\u2193 Export backup</button\n      ><label class="import-label"\n        >\u2191 Import backup<input\n          type="file"\n          id="import"\n          accept="application/json"\n          hidden\n      /></label>\n    </div>\n    <div class="profile">\n      <span>Z</span>\n      <div>Your workspace<small>Personal budget</small></div>\n    </div>\n  </aside>\n  <main>\n    <header>\n      <div class="breadcrumb">\n        Workspace <span>/</span> <b id="page-name">Monthly budget</b>\n      </div>\n      <div class="header-right">\n        <span id="save-status">Connecting to cloud\u2026</span\n        ><button id="month-prev" class="icon" aria-label="Previous month">\n          \u2039</button\n        ><input type="month" id="month" aria-label="Budget month" /><button\n          id="month-next"\n          class="icon"\n          aria-label="Next month"\n        >\n          \u203A\n        </button>\n      </div>\n    </header>\n    <div id="content"></div>\n    <footer>\n      <span>LESS GUESSWORK. MORE PEACE OF MIND.</span\n      ><span>Made for your real life.</span>\n    </footer>\n  </main>\n</div>\n<dialog id="modal"><div id="modal-content"></div></dialog>\n<div id="toast" role="status"></div>\n';
+var shell_default = '<div class="app">\n  <aside>\n    <a class="brand" href="#"\n      ><span class="brandmark">s</span> saldo<span class="branddot">.</span></a\n    >\n    <div class="workspace">PERSONAL WORKSPACE</div>\n    <nav>\n      <button data-view="budget" class="active">\n        <span>\u25A6</span> Monthly budget</button\n      ><button data-view="activity" aria-label="Activity"><span>\u2197</span> Activity</button\n      ><button data-view="accounts"><span>\u25A4</span> Accounts & routes</button\n      ><button data-view="settings"><span>\u2699</span> Plan settings</button>\n    </nav>\n    <div class="aside-bottom">\n      <div class="privacy-dot"></div>\n      Yours, and only yours.\n      <p>Private cloud budget.<br />No bank connection required.</p>\n      <button id="export" class="text-button">\u2193 Export plan backup</button\n      ><label class="import-label"\n        >\u2191 Import backup<input\n          type="file"\n          id="import"\n          accept="application/json"\n          hidden\n      /></label>\n    </div>\n    <div class="profile">\n      <span>Z</span>\n      <div>Your workspace<small>Personal budget</small></div>\n    </div>\n  </aside>\n  <main>\n    <header>\n      <div class="breadcrumb">\n        Workspace <span>/</span> <b id="page-name">Monthly budget</b>\n      </div>\n      <div class="header-right">\n        <span id="save-status">Connecting to cloud\u2026</span\n        ><button id="month-prev" class="icon" aria-label="Previous month">\n          \u2039</button\n        ><input type="month" id="month" aria-label="Budget month" /><button\n          id="month-next"\n          class="icon"\n          aria-label="Next month"\n        >\n          \u203A\n        </button>\n      </div>\n    </header>\n    <div id="content"></div>\n    <footer>\n      <span>LESS GUESSWORK. MORE PEACE OF MIND.</span\n      ><span>Made for your real life.</span>\n    </footer>\n  </main>\n</div>\n<dialog id="modal"><div id="modal-content"></div></dialog>\n<div id="toast" role="status"></div>\n';
 
 // main.mjs
 var $ = (s) => document.querySelector(s);
@@ -21669,6 +22454,8 @@ var CONFIG_KEY = "saldo-cloud-connection-v1";
 var client = null;
 var engine = null;
 var ui = null;
+var activity = null;
+var tracker = null;
 var currentUser = null;
 var generation = 0;
 function frame(content) {
@@ -21746,6 +22533,10 @@ function showStatus(state) {
 function clearWorkspace() {
   generation++;
   engine?.stop();
+  activity?.destroy();
+  tracker?.destroy();
+  activity = null;
+  tracker = null;
   ui?.destroy();
   engine = null;
   ui = null;
@@ -21770,17 +22561,38 @@ async function openSession(session) {
   const main = $("#workspace main");
   const tools = document.createElement("section");
   tools.id = "cloud-tools";
-  tools.innerHTML = '<span id="cloud-message">Loading cloud budget\u2026</span><button id="retry-cloud" hidden>Retry cloud save</button><button id="reload-cloud">Load latest</button><button id="cloud-export">Export backup</button><button id="signout">Sign out</button>';
+  tools.innerHTML = '<span id="cloud-message">Loading cloud budget\u2026</span><button id="retry-cloud" hidden>Retry cloud save</button><button id="reload-cloud">Load latest</button><button id="cloud-export">Export plan backup</button><button id="signout">Sign out</button>';
   main.insertBefore(tools, main.firstChild);
   const welcome = document.createElement("div");
   welcome.className = "cloud-onboarding";
   welcome.textContent = "Moving from the original app? Import your latest JSON backup in Plan settings. Keep a separate backup until you verify it on your other device. Changes save after acknowledgement from the cloud.";
   main.insertBefore(welcome, $("#content"));
   let sessionEngine;
+  const sessionTracker = tracker = createTrackerApi(client, userId, {
+    url: config.url,
+    key
+  });
   const sessionUI = ui = mountBudget({
     initial: initialState(),
+    onView: (view) => {
+      if (turn !== generation || currentUser !== userId) return;
+      if (view !== "activity") {
+        activity?.hide();
+        return;
+      }
+      if (!activity)
+        activity = mountActivity({
+          root: $("#content"),
+          api: sessionTracker,
+          getBudget: () => sessionUI.getState(),
+          userId,
+          functionUrl: config.url + "/functions/v1/shortcut-entry"
+        });
+      void activity.open();
+    },
     onChange: (payload) => {
-      if (turn === generation && currentUser === userId) sessionEngine?.change(payload);
+      if (turn === generation && currentUser === userId)
+        sessionEngine?.change(payload);
     }
   });
   sessionEngine = engine = new SyncEngine({
