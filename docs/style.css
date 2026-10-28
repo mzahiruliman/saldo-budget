@@ -177,7 +177,7 @@ nav button.active {
 main {
   min-width: 0;
 }
-header {
+.app > main > header {
   height: 80px;
   display: flex;
   align-items: center;
@@ -794,7 +794,7 @@ form .check-label input {
     padding-left: 13px;
     padding-right: 13px;
   }
-  header {
+  .app > main > header {
     padding: 0 25px;
   }
   #content {
@@ -851,7 +851,7 @@ form .check-label input {
   .profile {
     display: none;
   }
-  header {
+  .app > main > header {
     height: 61px;
     padding: 0 17px;
   }
