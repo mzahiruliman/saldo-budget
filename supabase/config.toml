@@ -1,0 +1,4 @@
+# This function authenticates its own restricted per-device capability.
+# Do not disable JWT verification globally or for normal authenticated functions.
+[functions.shortcut-entry]
+verify_jwt = false

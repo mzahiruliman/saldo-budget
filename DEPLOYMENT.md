@@ -1,5 +1,7 @@
 # Deployment checklist — Saldo cloud edition
 
+> **Existing installation adding Activity/Shortcuts:** use [TRACKER-DEPLOYMENT.md](TRACKER-DEPLOYMENT.md). The checklist below is for the original cloud setup, not an instruction to replace your live plan. The new feature remains release-gated.
+
 Keep the original portable Saldo and its latest exported backup until the cloud version is confirmed working.
 
 ## 1. Create the private database storage

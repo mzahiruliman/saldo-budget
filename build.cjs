@@ -19,6 +19,8 @@ const fs = require("node:fs"),
     "style.css",
     "fonts.css",
     "cloud.css",
+    "activity.css",
+    "SHORTCUTS.md",
     "dmsans-LICENSE.txt",
     "manrope-LICENSE.txt",
   ])
