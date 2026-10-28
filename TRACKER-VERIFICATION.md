@@ -24,6 +24,10 @@ Permission/accounting checks verify owner-only reads and mutations; denied anony
 
 Independent security/accounting review found no blockers. Frontend review identified two reproducible issues, then failing tests were added before fixes: repeated pairing now zeroizes the previous token textarea before replacing it, and history uses validated `(occurred_at,id)` cursors instead of shifting offsets. Timestamp precision is preserved; an exact remaining-row count also supports a REST cap smaller than the requested page. Browser tests cover disconnected concurrent inserts and explicit refresh; real HTTP tests page six timestamp-tied rows under a five-row cap without duplication.
 
+## Review closure
+
+The independent security/accounting review reported PASS with no blockers in its scope. Frontend review originally found the two issues above; both were reproduced with failing tests, fixed and included in the full passing verification matrix. A focused independent re-review then reported PASS for both fixes, independently rerunning all 10 tracker API tests and 20 Activity browser tests. This closes the identified review findings, not the live-deployment or physical-iPhone acceptance steps. The pull request remains a draft pending the owner's rollout approval.
+
 ## Repository privacy
 
 A programmatic scan of the intended source/build files found no literal GitHub credentials, private device credentials, privileged Supabase keys, private keys, literal session JWTs or private PDF/backup/image archives. The public initial state is valid with zero salary and no planned items. The private original budget, portable app, screenshots and browser backups are not included. Automated scans complement review; they are not a universal secret-detection guarantee.
