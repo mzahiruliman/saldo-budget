@@ -66,7 +66,7 @@ test("compiled app records actual activity via the real SDK without changing the
           (s, e) => s + e.amount_cents,
           0,
         ),
-        movements: {},
+        movements: { bank: 1500 },
       };
     else if (url.pathname === "/rest/v1/rpc/list_shortcut_devices") data = [];
     else if (url.pathname === "/rest/v1/transactions") data = entries;
@@ -110,6 +110,21 @@ test("compiled app records actual activity via the real SDK without changing the
   await expect(page.locator("[data-history]")).toContainText("Synthetic cafe");
   expect(entries[0].amount_cents).toBe(1234);
   expect(planWrites).toBe(0);
+  await page.locator('[data-view="accounts"]').click();
+  await expect(
+    page.locator('[data-account="bank"] [data-recorded]'),
+  ).toHaveText("+RM 15.00");
+  await expect(
+    page.locator('[data-account="bank"] [data-projected]'),
+  ).toBeVisible();
+  expect(planWrites).toBe(0);
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth),
+  ).toBe(true);
+  await page.screenshot({
+    path: "test-results/accounts-phone.png",
+    fullPage: true,
+  });
   await page.locator('[data-view="budget"]').click();
   await expect(
     page.getByRole("heading", { name: "Your month, accounted for." }),

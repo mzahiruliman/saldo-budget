@@ -352,3 +352,31 @@ test('history cursor stays stable across concurrent inserts and timestamp ties',
  assert.equal((await api.list('2026-10')).entries[0].id,id(61));
  await assert.rejects(api.list('2026-10',{id:'bad),user_id.eq.other',occurred_at:stamp}),/cursor/);
 });
+
+test('summary rejects malformed account movements instead of showing partial actuals', async () => {
+  const { createTrackerApi } = await import('./tracker-api.mjs');
+  let response = {
+    income_cents: 100,
+    expense_cents: 200,
+    transfer_cents: 300,
+    unassigned_income_cents: 0,
+    unassigned_expense_cents: 0,
+    movements: { bank: -200, card: 100 },
+  };
+  const api = createTrackerApi(
+    { rpc: async () => ({ data: structuredClone(response), error: null }) },
+    'owner',
+  );
+  assert.deepEqual((await api.summary('2026-11')).movements, {
+    bank: -200,
+    card: 100,
+  });
+  response.movements = { bank: 'not-cents' };
+  await assert.rejects(api.summary('2026-11'), /movement/);
+  response.movements = [];
+  await assert.rejects(api.summary('2026-11'), /movement/);
+  response.movements = { bank: 1.5 };
+  await assert.rejects(api.summary('2026-11'), /movement/);
+  delete response.movements;
+  await assert.rejects(api.summary('2026-11'), /movement/);
+});

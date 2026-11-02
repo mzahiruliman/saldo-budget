@@ -187,6 +187,22 @@ export function createTrackerApi(authClient, userId, connection) {
       for (const key of ["income_cents", "expense_cents", "transfer_cents"])
         if (!Number.isSafeInteger(data?.[key]))
           throw new Error("Invalid summary response");
+      for (const key of ["unassigned_income_cents", "unassigned_expense_cents"])
+        if (data?.[key] !== undefined && !Number.isSafeInteger(data[key]))
+          throw new Error("Invalid summary response");
+      if (data?.movements === undefined)
+        throw new Error("Invalid summary movement response");
+      const movements = data.movements;
+      if (
+        !movements ||
+        typeof movements !== "object" ||
+        Array.isArray(movements)
+      )
+        throw new Error("Invalid summary movement response");
+      for (const [id, delta] of Object.entries(movements)) {
+        if (!id || !Number.isSafeInteger(delta))
+          throw new Error("Invalid summary movement response");
+      }
       return data;
     },
     destroy() {

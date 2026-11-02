@@ -14,6 +14,12 @@ For an existing installation, follow **[TRACKER-DEPLOYMENT.md](TRACKER-DEPLOYMEN
 
 Plan backups and Activity transaction exports are **separate**. Export both; neither contains device credentials. The current app does not have a transaction-JSON restore UI.
 
+## Accounts: plan versus actual
+
+**Accounts & routes** shows each account's plan projection unchanged and, alongside it, the recorded movement for the selected month from Activity and the Shortcut. Enter the **actual opening balance** at the start of a month to get a tracked balance: actual opening plus recorded income, minus recorded expenses, plus or minus own-account transfers. Actual opening balances are dated the first of their month, accept negative card balances, and reset for a new month.
+
+The tracked balance is not a live bank balance and the app does not connect to a bank. Recording a transaction never rewrites the plan projection, salary, Ibu, item amounts or paid flags. This upgrade stores the new optional field in the private budget document and requires **no database migration**.
+
 ## Deploy after creating your GitHub OAuth / Supabase project
 
 1. Export a backup from your original local Saldo. Keep it private.

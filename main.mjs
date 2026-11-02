@@ -163,7 +163,17 @@ async function openSession(session) {
       if (turn === generation && currentUser === userId)
         sessionEngine?.change(payload);
     },
+    loadActuals: (month) => sessionTracker.summary(month),
   }));
+  let actualsRefreshTimer;
+  if (typeof client.channel === "function")
+    sessionTracker.subscribe(() => {
+      clearTimeout(actualsRefreshTimer);
+      actualsRefreshTimer = setTimeout(() => {
+        if (turn === generation && currentUser === userId)
+          sessionUI.refreshActuals();
+      }, 180);
+    });
   sessionEngine = engine = new SyncEngine({
     api: budgetApi(client, userId, { url: config.url, key }),
     initial: initialState(),
