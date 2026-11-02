@@ -60,6 +60,7 @@ export function nextMonth(state, key) {
   if (!Object.hasOwn(result.months, key)) {
     result.months[key] = structuredClone(state.months[state.selected]);
     result.months[key].openingBalances = {};
+    result.months[key].actualOpeningBalances = {};
     for (const item of result.months[key].items) item.paid = false;
   }
   result.selected = key;
@@ -74,6 +75,19 @@ const percent = (value) =>
   value >= 0 &&
   value <= 100;
 const text = (value) => typeof value === "string" && value.trim().length > 0;
+const dayKey = (value) => {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const date = new Date(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3])),
+  );
+  return (
+    date.getUTCFullYear() === Number(match[1]) &&
+    date.getUTCMonth() === Number(match[2]) - 1 &&
+    date.getUTCDate() === Number(match[3])
+  );
+};
 export function validateMonth(month) {
   const errors = [],
     warnings = [];
@@ -132,6 +146,22 @@ export function validateMonth(month) {
       for (const balance of Object.values(month.openingBalances))
         if (balance !== null && !Number.isSafeInteger(balance))
           errors.push("Opening balance must be null or signed integer cents");
+  }
+  if (month.actualOpeningBalances !== undefined) {
+    if (!record(month.actualOpeningBalances))
+      errors.push("Actual opening balances must be an object");
+    else
+      for (const [id, entry] of Object.entries(month.actualOpeningBalances)) {
+        if (!text(id)) errors.push("Actual balance account id is required");
+        if (!record(entry))
+          errors.push("Actual opening balance must contain amount and asOf");
+        else {
+          if (!Number.isSafeInteger(entry.amount))
+            errors.push("Actual opening balance must be signed integer cents");
+          if (!dayKey(entry.asOf))
+            errors.push("Actual opening balance date must be YYYY-MM-DD");
+        }
+      }
   }
   if (month.transfers !== undefined) {
     if (!Array.isArray(month.transfers))
@@ -218,6 +248,15 @@ export function validateState(state) {
           for (const id of Object.keys(month.openingBalances))
             if (!ids.has(id))
               errors.push(`${key}: Unknown balance account ${id}`);
+        if (record(month.actualOpeningBalances))
+          for (const [id, entry] of Object.entries(month.actualOpeningBalances)) {
+            if (!ids.has(id))
+              errors.push(`${key}: Unknown actual balance account ${id}`);
+            if (record(entry) && dayKey(entry.asOf) && entry.asOf !== `${key}-01`)
+              warnings.push(
+                `${key}: Actual opening balance must be dated the first of the month`,
+              );
+          }
         if (Array.isArray(month.transfers))
           for (const transfer of month.transfers)
             if (record(transfer))
@@ -254,6 +293,7 @@ export function initialState() {
         targets: { commitment: 0, entertainment: 0, savings: 0 },
         items: [],
         openingBalances: {},
+        actualOpeningBalances: {},
         transfers: [],
       },
     },

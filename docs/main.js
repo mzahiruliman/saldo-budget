@@ -20852,6 +20852,7 @@ function nextMonth(state, key2) {
   if (!Object.hasOwn(result.months, key2)) {
     result.months[key2] = structuredClone(state.months[state.selected]);
     result.months[key2].openingBalances = {};
+    result.months[key2].actualOpeningBalances = {};
     for (const item of result.months[key2].items) item.paid = false;
   }
   result.selected = key2;
@@ -20861,6 +20862,15 @@ var record = (value) => value !== null && typeof value === "object" && !Array.is
 var cents = (value) => Number.isSafeInteger(value) && value >= 0;
 var percent = (value) => typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 100;
 var text = (value) => typeof value === "string" && value.trim().length > 0;
+var dayKey = (value) => {
+  if (typeof value !== "string") return false;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return false;
+  const date = new Date(
+    Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+  );
+  return date.getUTCFullYear() === Number(match[1]) && date.getUTCMonth() === Number(match[2]) - 1 && date.getUTCDate() === Number(match[3]);
+};
 function validateMonth(month) {
   const errors = [], warnings = [];
   const result = () => ({ valid: errors.length === 0, errors, warnings });
@@ -20915,6 +20925,22 @@ function validateMonth(month) {
       for (const balance of Object.values(month.openingBalances))
         if (balance !== null && !Number.isSafeInteger(balance))
           errors.push("Opening balance must be null or signed integer cents");
+  }
+  if (month.actualOpeningBalances !== void 0) {
+    if (!record(month.actualOpeningBalances))
+      errors.push("Actual opening balances must be an object");
+    else
+      for (const [id, entry] of Object.entries(month.actualOpeningBalances)) {
+        if (!text(id)) errors.push("Actual balance account id is required");
+        if (!record(entry))
+          errors.push("Actual opening balance must contain amount and asOf");
+        else {
+          if (!Number.isSafeInteger(entry.amount))
+            errors.push("Actual opening balance must be signed integer cents");
+          if (!dayKey(entry.asOf))
+            errors.push("Actual opening balance date must be YYYY-MM-DD");
+        }
+      }
   }
   if (month.transfers !== void 0) {
     if (!Array.isArray(month.transfers))
@@ -20994,6 +21020,15 @@ function validateState(state) {
             if (!ids.has(id))
               errors.push(`${key2}: Unknown balance account ${id}`);
         }
+        if (record(month.actualOpeningBalances))
+          for (const [id, entry] of Object.entries(month.actualOpeningBalances)) {
+            if (!ids.has(id))
+              errors.push(`${key2}: Unknown actual balance account ${id}`);
+            if (record(entry) && dayKey(entry.asOf) && entry.asOf !== `${key2}-01`)
+              warnings.push(
+                `${key2}: Actual opening balance must be dated the first of the month`
+              );
+          }
         if (Array.isArray(month.transfers)) {
           for (const transfer of month.transfers)
             if (record(transfer)) {
@@ -21032,6 +21067,7 @@ function initialState() {
         targets: { commitment: 0, entertainment: 0, savings: 0 },
         items: [],
         openingBalances: {},
+        actualOpeningBalances: {},
         transfers: []
       }
     }
@@ -21049,12 +21085,17 @@ var esc = (v) => String(v ?? "").replace(
     "'": "&#39;"
   })[c]
 );
-function mountBudget({ initial, onChange, onView = () => {
-} }) {
+function mountBudget({
+  initial,
+  onChange,
+  onView = () => {
+  },
+  loadActuals = null
+}) {
   const root = document.querySelector("#workspace");
   const $2 = (s) => root.querySelector(s);
   let alive = true, toastTimer;
-  let state = structuredClone(initial), view = "budget", filter = "all", query = "";
+  let state = structuredClone(initial), view = "budget", filter = "all", query = "", actuals = null, actualsMonth = null, actualsError = "", actualsLoading = false, actualsLoadingFor = null, actualsSeq = 0;
   const month = () => state.months[state.selected], cats = ["commitment", "entertainment", "savings"], title = (s) => s.charAt(0).toUpperCase() + s.slice(1), fmt = (n) => money(n).replace("RM ", ""), account = (id) => state.accounts.find((a) => a.id === id)?.name || id;
   function toast(text2) {
     if (!alive) return;
@@ -21151,16 +21192,105 @@ function mountBudget({ initial, onChange, onView = () => {
       render();
     };
   }
-  function renderOther() {
-    if (view === "settings") {
-      renderSettings();
-      return;
+  function dateLabel(value) {
+    return (/* @__PURE__ */ new Date(value + "T00:00:00Z")).toLocaleDateString("en-GB", {
+      day: "numeric",
+      month: "short",
+      year: "numeric",
+      timeZone: "UTC"
+    });
+  }
+  function signedMoney(value) {
+    return value > 0 ? `+${money(value)}` : money(value);
+  }
+  function ensureActuals() {
+    if (!loadActuals || view !== "accounts") return;
+    const key2 = state.selected;
+    if (actualsMonth === key2 && (actuals || actualsError)) return;
+    if (actualsLoading && actualsLoadingFor === key2) return;
+    const request = ++actualsSeq;
+    actualsLoading = true;
+    actualsLoadingFor = key2;
+    actualsMonth = key2;
+    Promise.resolve().then(() => loadActuals(key2)).then((summary) => {
+      if (!alive || request !== actualsSeq || state.selected !== key2) return;
+      if (!summary || typeof summary !== "object" || Array.isArray(summary))
+        throw new Error("Invalid recorded activity response.");
+      actuals = summary;
+      actualsError = "";
+    }).catch((error) => {
+      if (!alive || request !== actualsSeq || state.selected !== key2) return;
+      actuals = null;
+      actualsError = error?.message || "Could not load recorded activity.";
+    }).finally(() => {
+      if (!alive || request !== actualsSeq) return;
+      actualsLoading = false;
+      if (view === "accounts" && state.selected === key2) renderAccounts();
+    });
+  }
+  function refreshActuals() {
+    if (!alive) return;
+    actualsSeq++;
+    actuals = null;
+    actualsMonth = null;
+    actualsError = "";
+    actualsLoading = false;
+    if (view === "accounts") renderAccounts();
+  }
+  function editActual(id) {
+    const m = month(), a = state.accounts.find((account2) => account2.id === id), actual = m.actualOpeningBalances?.[id];
+    modal(
+      `<h2>${esc(a.name)} \xB7 actual opening balance</h2><p class="subtitle">Enter the balance you actually had at the start of ${esc(state.selected)}, before any movement recorded in this month. It is used only for the tracked balance; your plan projection stays unchanged. Use a negative value for a card balance you owe.</p><form id="actual-form"><label for="actual-amount">Actual opening balance (RM)</label><input id="actual-amount" type="number" min="-100000000" max="100000000" step="0.01" value="${actual == null ? "" : actual.amount / 100}"><p class="review-note">As of ${esc(dateLabel(`${state.selected}-01`))}. Recorded income, expenses and transfers are added or subtracted automatically.</p><div class="form-actions">${actual ? '<button class="danger" id="remove-actual" type="button">Remove</button>' : ""}<button type="button" data-close>Cancel</button><button class="primary">Save actual balance</button></div></form>`
+    );
+    if (actual)
+      $2("#remove-actual").onclick = () => {
+        delete m.actualOpeningBalances[id];
+        save();
+        $2("#modal").close();
+        render();
+      };
+    $2("form#actual-form").onsubmit = (e) => {
+      e.preventDefault();
+      const value = $2("#actual-amount").value;
+      m.actualOpeningBalances ??= {};
+      if (value === "") delete m.actualOpeningBalances[id];
+      else
+        m.actualOpeningBalances[id] = {
+          amount: Math.round(Number(value) * 100),
+          asOf: `${state.selected}-01`
+        };
+      save();
+      $2("#modal").close();
+      render();
+    };
+  }
+  function renderAccounts() {
+    const m = month(), plan = routes(m), transfers = m.transfers || [], opening = m.openingBalances || {}, actualsOpening = m.actualOpeningBalances || {};
+    if (actualsMonth !== state.selected) {
+      actuals = null;
+      actualsError = "";
+      actualsLoading = false;
+      actualsLoadingFor = null;
+      actualsSeq++;
     }
-    const m = month(), plan = routes(m), transfers = m.transfers || [], opening = m.openingBalances || {};
+    const summary = actualsMonth === state.selected ? actuals : null;
     const balances = state.accounts.filter(
       (a) => a.type !== "external" && a.type !== "recipient"
     );
-    $2("#content").innerHTML = `<div class="title-row"><div><div class="eyebrow">FOLLOW YOUR MONEY</div><h1>A home for every ringgit.</h1><p class="subtitle">Your accounts, planned payments, and the transfers that connect them.</p></div><button class="primary" id="add-account" aria-label="Add account">\uFF0B Add account</button></div><div class="review-note" style="margin:0 0 20px">These are <strong>planning projections, not live balances</strong>. Enter each account's opening balance for this month, then add any funding transfers. Budget allocations include paid and unpaid items. A credit-card flag does not add a second card repayment.</div><div class="account-grid">${balances.map((a) => {
+    const known = new Set(balances.map((a) => a.id));
+    const orphanMovements = summary ? Object.entries(summary.movements || {}).filter(
+      ([id]) => !known.has(id)
+    ) : [];
+    const unassignedIncome = summary?.unassigned_income_cents || 0;
+    const unassignedExpense = summary?.unassigned_expense_cents || 0;
+    const unassignedText = unassignedIncome || unassignedExpense ? `Unassigned recorded: income ${signedMoney(unassignedIncome)}, expense ${signedMoney(-unassignedExpense)} (net ${signedMoney(unassignedIncome - unassignedExpense)}). ` : "";
+    let status = "Recorded activity is separate from your plan projection.";
+    if (!loadActuals)
+      status = "Recorded activity is available after signing in to the cloud app.";
+    else if (actualsError)
+      status = `Recorded activity unavailable: ${actualsError}`;
+    else if (!summary) status = "Loading recorded activity\u2026";
+    $2("#content").innerHTML = `<div class="title-row"><div><div class="eyebrow">FOLLOW YOUR MONEY</div><h1>A home for every ringgit.</h1><p class="subtitle">Your accounts, planned payments, and the transfers that connect them.</p></div><button class="primary" id="add-account" aria-label="Add account">\uFF0B Add account</button></div><div class="review-note" style="margin:0 0 20px">Each account shows its <strong>plan projection</strong> next to <strong>recorded activity</strong>. Recording a transaction never changes your plan. A tracked balance starts from the actual opening balance you enter and applies this month's recorded movement.</div><div class="actuals-status"><span data-actuals-status role="status">${esc(status)}</span>${loadActuals ? `<button id="retry-actuals">${actualsError ? "Retry" : "Refresh"} recorded activity</button>` : ""}</div><div class="account-grid">${balances.map((a) => {
       const balance = Object.hasOwn(opening, a.id) ? opening[a.id] : null;
       let change = a.id === m.salaryAccount ? m.salary : 0;
       for (const r of [...plan, ...transfers]) {
@@ -21168,12 +21298,21 @@ function mountBudget({ initial, onChange, onView = () => {
         if (r.to === a.id) change += r.amount;
       }
       const projected = balance === null ? null : balance + change;
-      return `<section class="account" data-account="${esc(a.id)}"><h3 aria-label="${esc(a.name)}">${esc(a.name)} <span class="tag">${esc(a.type)}</span></h3><p>Projected after this month's plan</p><strong class="${projected !== null && projected < 0 ? "negative" : ""}">${projected === null ? "Not set" : money(projected)}</strong><p>Opening: ${balance === null ? "not entered" : money(balance)}<br>Planned net change: ${money(change)}</p><button data-balance="${esc(a.id)}" aria-label="Edit ${esc(a.name)} balance">${balance === null ? "Set opening balance" : "Edit opening balance"} \u2197</button></section>`;
+      const storedActual = Object.hasOwn(actualsOpening, a.id) ? actualsOpening[a.id] : null;
+      const actual = storedActual?.asOf === `${state.selected}-01` ? storedActual : null;
+      const actualNeedsReview = storedActual && !actual;
+      const movement = summary ? Object.hasOwn(summary.movements || {}, a.id) ? summary.movements[a.id] : 0 : null;
+      const tracked = actual && movement !== null ? actual.amount + movement : null;
+      const trackedText = tracked !== null ? money(tracked) : actual ? actualsError ? "Unavailable" : "Loading\u2026" : "Not set";
+      const actualAction = actual ? "Edit" : actualNeedsReview ? "Reset" : "Set";
+      return `<section class="account" data-account="${esc(a.id)}"><h3 aria-label="${esc(a.name)}">${esc(a.name)} <span class="tag">${esc(a.type)}</span></h3><p class="account-label">Plan projection</p><strong class="projected ${projected !== null && projected < 0 ? "negative" : ""}" data-projected>${projected === null ? "Not set" : money(projected)}</strong><p>Plan opening: ${balance === null ? "not entered" : money(balance)}<br>Planned net change: ${money(change)}</p><div class="actuals"><p class="actuals-heading">Recorded activity</p><div class="actual-row"><span>Recorded this month</span><strong class="${movement !== null && movement < 0 ? "negative" : ""}" data-recorded>${movement === null ? "\u2014" : signedMoney(movement)}</strong></div><div class="actual-row"><span>Tracked balance</span><strong class="${tracked !== null && tracked < 0 ? "negative" : ""}" data-tracked>${trackedText}</strong></div><p class="actual-note">${actual ? `Actual opening ${money(actual.amount)} as of ${dateLabel(actual.asOf)}.` : actualNeedsReview ? "The saved actual opening has a different date. Set it again for this month." : "Set the actual balance at the start of this month to track it."}</p><button data-actual="${esc(a.id)}" aria-label="${actualAction} actual opening for ${esc(a.name)}">${actualAction} actual opening \u2197</button></div><button data-balance="${esc(a.id)}" aria-label="Edit ${esc(a.name)} plan opening balance">${balance === null ? "Set plan opening" : "Edit plan opening"} \u2197</button></section>`;
     }).join(
       ""
-    )}</div><div class="section-title routes-title"><div><h2>Funding transfers</h2><p>Move money between your accounts without counting it as spending.</p></div><button id="add-transfer" aria-label="Add transfer">\uFF0B Add transfer</button></div><section class="ledger"><div class="table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Amount (RM)</th><th></th></tr></thead><tbody>${transfers.map((t) => `<tr><td>${esc(account(t.from))}</td><td>${esc(account(t.to))}</td><td class="money">${fmt(t.amount)}</td><td><button class="row-edit" data-remove-transfer="${esc(t.id)}" aria-label="Remove transfer ${esc(account(t.from))} to ${esc(account(t.to))}">\xD7</button></td></tr>`).join("") || '<tr><td colspan="4" class="empty">No funding transfers yet. Add only the transfers you plan to make.</td></tr>'}</tbody></table></div></section><div class="section-title routes-title"><div><h2>Where the budget goes</h2><p>Grouped allocations, including Ibu. Review each inferred route before using it.</p></div></div><section class="ledger"><div class="table-wrap"><table><thead><tr><th>From account</th><th>To account / payee</th><th>For</th><th>Amount (RM)</th></tr></thead><tbody>${plan.map((r) => `<tr><td>${esc(account(r.from))}</td><td>${esc(account(r.to))}</td><td style="white-space:normal;max-width:340px;line-height:1.7">${r.items.map(esc).join(", ")}</td><td class="money">${fmt(r.amount)}</td></tr>`).join("")}</tbody></table></div></section>`;
+    )}</div><p class="actuals-note" data-actuals-note>${orphanMovements.length ? `Recorded movement for an account no longer listed: ${orphanMovements.map(([id, delta]) => `${esc(id.slice(0, 8))}\u2026 ${signedMoney(delta)}`).join(", ")}. ` : ""}${unassignedText}${summary ? "Own-account transfers are included in movement and are not counted as income or spending." : ""}</p><div class="section-title routes-title"><div><h2>Funding transfers</h2><p>Move money between your accounts without counting it as spending.</p></div><button id="add-transfer" aria-label="Add transfer">\uFF0B Add transfer</button></div><section class="ledger"><div class="table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Amount (RM)</th><th></th></tr></thead><tbody>${transfers.map((t) => `<tr><td>${esc(account(t.from))}</td><td>${esc(account(t.to))}</td><td class="money">${fmt(t.amount)}</td><td><button class="row-edit" data-remove-transfer="${esc(t.id)}" aria-label="Remove transfer ${esc(account(t.from))} to ${esc(account(t.to))}">\xD7</button></td></tr>`).join("") || '<tr><td colspan="4" class="empty">No funding transfers yet. Add only the transfers you plan to make.</td></tr>'}</tbody></table></div></section><div class="section-title routes-title"><div><h2>Where the budget goes</h2><p>Grouped allocations, including Ibu. Review each inferred route before using it.</p></div></div><section class="ledger"><div class="table-wrap"><table><thead><tr><th>From account</th><th>To account / payee</th><th>For</th><th>Amount (RM)</th></tr></thead><tbody>${plan.map((r) => `<tr><td>${esc(account(r.from))}</td><td>${esc(account(r.to))}</td><td style="white-space:normal;max-width:340px;line-height:1.7">${r.items.map(esc).join(", ")}</td><td class="money">${fmt(r.amount)}</td></tr>`).join("")}</tbody></table></div></section>`;
     $2("#add-account").onclick = addAccount;
     $2("#add-transfer").onclick = addTransfer;
+    $2("#retry-actuals")?.addEventListener("click", refreshActuals);
+    document.querySelectorAll("[data-actual]").forEach((b) => b.onclick = () => editActual(b.dataset.actual));
     document.querySelectorAll("[data-balance]").forEach((b) => b.onclick = () => editBalance(b.dataset.balance));
     document.querySelectorAll("[data-remove-transfer]").forEach(
       (b) => b.onclick = () => {
@@ -21189,6 +21328,14 @@ function mountBudget({ initial, onChange, onView = () => {
         };
       }
     );
+    ensureActuals();
+  }
+  function renderOther() {
+    if (view === "settings") {
+      renderSettings();
+      return;
+    }
+    renderAccounts();
   }
   function addAccount() {
     modal(
@@ -21256,7 +21403,7 @@ function mountBudget({ initial, onChange, onView = () => {
       return `<tr><td>${title(c)}</td><td>${money(target)}</td><td>${money(totals[c])}</td><td class="${target < totals[c] ? "negative" : ""}">${money(target - totals[c])}</td></tr>`;
     }).join(
       ""
-    )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">\u2193 Export backup</button> <button id="settings-import">\u2191 Import backup</button><p class="subtitle" style="margin-top:17px">New months copy your selected plan, reset payment checkmarks, and require fresh opening balances. Changes never rewrite an existing month.</p></section>`;
+    )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">\u2193 Export backup</button> <button id="settings-import">\u2191 Import backup</button><p class="subtitle" style="margin-top:17px">New months copy your selected plan, reset payment checkmarks, and require fresh plan and actual opening balances. Changes never rewrite an existing month.</p></section>`;
     $2("#targets-form").onsubmit = (e) => {
       e.preventDefault();
       m.targets = Object.fromEntries(
@@ -21417,11 +21564,18 @@ function mountBudget({ initial, onChange, onView = () => {
       });
       $2("#modal-content").replaceChildren();
       state = structuredClone(next);
+      actualsSeq++;
+      actuals = null;
+      actualsMonth = null;
+      actualsError = "";
+      actualsLoading = false;
+      actualsLoadingFor = null;
       render();
     },
     getState() {
       return structuredClone(state);
     },
+    refreshActuals,
     exportBackup
   };
 }
@@ -21856,6 +22010,18 @@ function createTrackerApi(authClient, userId, connection) {
       for (const key2 of ["income_cents", "expense_cents", "transfer_cents"])
         if (!Number.isSafeInteger(data?.[key2]))
           throw new Error("Invalid summary response");
+      for (const key2 of ["unassigned_income_cents", "unassigned_expense_cents"])
+        if (data?.[key2] !== void 0 && !Number.isSafeInteger(data[key2]))
+          throw new Error("Invalid summary response");
+      if (data?.movements === void 0)
+        throw new Error("Invalid summary movement response");
+      const movements = data.movements;
+      if (!movements || typeof movements !== "object" || Array.isArray(movements))
+        throw new Error("Invalid summary movement response");
+      for (const [id, delta] of Object.entries(movements)) {
+        if (!id || !Number.isSafeInteger(delta))
+          throw new Error("Invalid summary movement response");
+      }
       return data;
     },
     destroy() {
@@ -22593,8 +22759,18 @@ async function openSession(session) {
     onChange: (payload) => {
       if (turn === generation && currentUser === userId)
         sessionEngine?.change(payload);
-    }
+    },
+    loadActuals: (month) => sessionTracker.summary(month)
   });
+  let actualsRefreshTimer;
+  if (typeof client.channel === "function")
+    sessionTracker.subscribe(() => {
+      clearTimeout(actualsRefreshTimer);
+      actualsRefreshTimer = setTimeout(() => {
+        if (turn === generation && currentUser === userId)
+          sessionUI.refreshActuals();
+      }, 180);
+    });
   sessionEngine = engine = new SyncEngine({
     api: budgetApi(client, userId, { url: config.url, key }),
     initial: initialState(),
