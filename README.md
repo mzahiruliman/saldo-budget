@@ -49,6 +49,22 @@ GitHub Pages publishes static code, not private budgets. Supabase identifies sig
 
 The client validates imported/cloud state; the save function enforces authentication, object shape, size, and concurrency rather than validating every budgeting field. A user can only modify their own data. No bank connection or payment execution is provided.
 
+## Five planning improvements (local feature branch)
+
+1. **Chronological carry-forward and explicit scope.** New months inherit the latest earlier saved month's recurring forward plan, never whichever later month is selected. No predecessor means an empty breakdown. Add/edit/delete offers **This month onward** (default) or **This month only**. Onward stops at the first explicit saved override or different recurring snapshot. Retained IDs keep each target month's own paid state; new items start unpaid. Month-only edits preserve the previous recurring baseline even for future months not created yet. A later onward operation applies only its own item delta to that baseline; unrelated earlier month-only edits, additions and deletions stay local.
+2. **Truthful persisted labels.** New carries record their source; edited months show **Own changes in this month**. Legacy documents show **Carry source not recorded**, without guessing. Identical explicit edits establish a boundary too.
+3. **Optional month-start review.** Confirm income, review recurring items, enter opening balances if needed, and start unpaid are month-local confirmations only. They never change money, balances or paid flags; new months start unchecked.
+4. **Recurring / One-off.** The item editor and breakdown show recurrence. Missing legacy recurrence means recurring. One-offs remain in their month and never enter inherited forward plans.
+5. **Explicit replacement and bounded undo.** In Plan settings, choose the source and review exact later saved months, source definitions and before/after counts/totals. Replacing needs explicit consent, reset when the source changes; cancel does nothing. All target breakdowns, including overrides and one-offs, are replaced by unpaid recurring source items. Undo restores only the latest replacement's items/planning metadata, not newer income, targets, balances, transfers or review checkboxes. Any intervening item/paid/planning change rejects undo atomically. The undo snapshot is limited to 1.8 MB and exists only in the open session; reload, import, sign-out or loading another snapshot clears it. Export a backup for durable recovery.
+
+Income, Ibu, category targets, planning and actual opening balances, funding transfers and recorded Activity stay isolated from breakdown edits/replacement. New-month creation retains the existing selected-plan copy behavior for non-item settings; paid flags, review confirmations and both opening-balance maps reset. Funding transfers continue to copy as before.
+
+These are optional fields in version-1 budget documents; old documents remain accepted, with validation for new metadata/recurrence. No database migration or automatic October replacement is included. The pure `resetLaterBreakdowns` helper remains available for separately authorized maintenance, not app mount/navigation. Replacement is only through the confirmed user action.
+
+Item add/edit/delete validation failures leave the dialog and draft available, show an actionable error, and do not save or partially mutate the plan. This includes valid legacy item lists exceeding generated forward-plan limits and planning revision overflow.
+
+See [MONTHLY-BREAKDOWN-VERIFICATION.md](MONTHLY-BREAKDOWN-VERIFICATION.md) for exact evidence, limitations and release/rollback gates. This working tree is not published or deployed.
+
 ## Develop
 
 ```sh
@@ -61,7 +77,7 @@ Open `http://127.0.0.1:5175/saldo-budget/` to test the same repository subpath a
 
 ```sh
 npm test
-npx playwright install chromium
+npx playwright install chromium webkit
 npm run test:ui
 ```
 

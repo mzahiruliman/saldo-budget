@@ -20846,16 +20846,147 @@ function routes(month) {
   return [...groups.values()];
 }
 var monthKey = (key2) => typeof key2 === "string" && /^\d{4}-(0[1-9]|1[0-2])$/.test(key2);
+var recurring = (items) => items.filter((item) => item.recurrence !== "one-off");
+var forwardItems = (month) => month.planning?.forwardItems ?? recurring(month.items);
+var unpaid = (items) => items.map((item) => ({ ...structuredClone(item), paid: false }));
 function nextMonth(state, key2) {
   if (!monthKey(key2)) throw new TypeError("Invalid month: expected YYYY-MM");
   const result = structuredClone(state);
   if (!Object.hasOwn(result.months, key2)) {
     result.months[key2] = structuredClone(state.months[state.selected]);
+    const predecessor = Object.keys(state.months).filter((month) => month < key2).sort().at(-1);
+    result.months[key2].items = unpaid(predecessor ? forwardItems(state.months[predecessor]) : []);
+    result.months[key2].planning = { source: predecessor ?? null, ownChanges: false, boundary: false, revision: 0 };
+    result.months[key2].reviewChecklist = {};
     result.months[key2].openingBalances = {};
     result.months[key2].actualOpeningBalances = {};
     for (const item of result.months[key2].items) item.paid = false;
   }
   result.selected = key2;
+  return result;
+}
+var breakdown = (items) => JSON.stringify(items.map((item) => [
+  item.id,
+  item.name,
+  item.amount,
+  item.category,
+  item.from,
+  item.to,
+  item.credit,
+  item.subscription,
+  item.review,
+  item.note,
+  item.recurrence ?? "recurring"
+]));
+function updateMonthItems(state, key2, items, { scope = "onward" } = {}) {
+  if (!["month", "onward"].includes(scope)) throw new TypeError("Invalid edit scope");
+  if (!validateState(state).valid) throw new TypeError("Invalid budget state");
+  if (!monthKey(key2) || !Object.hasOwn(state.months, key2))
+    throw new TypeError("Edited month must exist");
+  const result = structuredClone(state);
+  const baseline = forwardItems(state.months[key2]);
+  const previous = breakdown(baseline);
+  result.months[key2].items = structuredClone(items);
+  if (!validateState(result).valid) throw new TypeError("Invalid breakdown");
+  const before = new Map(state.months[key2].items.map((item) => [item.id, item]));
+  const after = new Map(items.map((item) => [item.id, item]));
+  const changed = new Set([...before.keys(), ...after.keys()].filter((id) => !before.has(id) || !after.has(id) || breakdown([before.get(id)]) !== breakdown([after.get(id)])));
+  const baselineIds = new Set(baseline.map((item) => item.id));
+  const forward = scope === "month" ? baseline : [
+    ...baseline.flatMap((item) => !changed.has(item.id) ? [item] : after.has(item.id) && after.get(item.id).recurrence !== "one-off" ? [after.get(item.id)] : []),
+    ...recurring(items).filter((item) => changed.has(item.id) && !baselineIds.has(item.id))
+  ];
+  result.months[key2].planning = {
+    ...state.months[key2].planning,
+    source: state.months[key2].planning?.source ?? null,
+    ownChanges: true,
+    boundary: true,
+    revision: (state.months[key2].planning?.revision ?? 0) + 1,
+    forwardItems: unpaid(forward)
+  };
+  if (!validateState(result).valid) throw new TypeError("Invalid breakdown");
+  if (scope === "onward" && previous !== breakdown(forward)) {
+    for (const future of Object.keys(state.months).filter((month) => month > key2).sort()) {
+      if (state.months[future].planning?.boundary || breakdown(recurring(state.months[future].items)) !== previous) break;
+      const paid = new Map(state.months[future].items.map((item) => [item.id, item.paid]));
+      const localOneOffs = state.months[future].items.filter((item) => item.recurrence === "one-off" && !changed.has(item.id));
+      result.months[future].items = [...forward.map((item) => ({ ...structuredClone(item), paid: paid.get(item.id) ?? false })), ...structuredClone(localOneOffs)];
+      result.months[future].planning = {
+        ...state.months[future].planning,
+        source: key2,
+        ownChanges: localOneOffs.length > 0,
+        boundary: false,
+        forwardItems: unpaid(forward),
+        revision: (state.months[future].planning?.revision ?? 0) + 1
+      };
+    }
+  }
+  if (!validateState(result).valid) throw new TypeError("Invalid propagated breakdown");
+  return result;
+}
+function previewLaterBreakdowns(state, sourceKey) {
+  if (!validateState(state).valid || !monthKey(sourceKey) || !Object.hasOwn(state.months, sourceKey))
+    throw new TypeError("Source month must exist in a valid budget");
+  const items = recurring(state.months[sourceKey].items);
+  const total = (entries) => entries.reduce((sum, item) => sum + item.amount, 0);
+  return { source: sourceKey, items: structuredClone(items), targets: Object.keys(state.months).filter((key2) => key2 > sourceKey).sort().map((key2) => ({
+    key: key2,
+    beforeCount: state.months[key2].items.length,
+    afterCount: items.length,
+    beforeTotal: total(state.months[key2].items),
+    afterTotal: total(items),
+    ownChanges: state.months[key2].planning?.ownChanges ?? null
+  })) };
+}
+var breakdownSnapshot = (month) => ({ items: structuredClone(month.items), planning: structuredClone(month.planning) });
+function replaceLaterBreakdowns(state, sourceKey) {
+  const preview = previewLaterBreakdowns(state, sourceKey);
+  if (!preview.targets.length) throw new TypeError("No later saved target months");
+  const result = structuredClone(state), entries = [];
+  for (const { key: key2 } of preview.targets) {
+    const before = breakdownSnapshot(state.months[key2]);
+    result.months[key2].items = unpaid(preview.items);
+    result.months[key2].planning = {
+      source: sourceKey,
+      ownChanges: false,
+      boundary: false,
+      forwardItems: unpaid(preview.items),
+      revision: (state.months[key2].planning?.revision ?? 0) + 1
+    };
+    entries.push({ key: key2, before, after: breakdownSnapshot(result.months[key2]) });
+  }
+  const undo = { entries };
+  if (new TextEncoder().encode(JSON.stringify(undo)).length > 18e5)
+    throw new TypeError("Replacement undo snapshot exceeds the 1.8 MB size limit");
+  if (!validateState(result).valid) throw new TypeError("Invalid replacement result");
+  return { state: result, undo };
+}
+function undoBreakdownReplacement(state, undo) {
+  if (!validateState(state).valid || !record(undo) || !Array.isArray(undo.entries) || !undo.entries.length || new TextEncoder().encode(JSON.stringify(undo)).length > 18e5)
+    throw new TypeError("Invalid undo snapshot");
+  const keys = /* @__PURE__ */ new Set();
+  for (const entry of undo.entries) {
+    if (!record(entry) || !monthKey(entry.key) || keys.has(entry.key) || !Object.hasOwn(state.months, entry.key) || !record(entry.before) || !record(entry.after) || [entry.before, entry.after].some((snapshot) => !Array.isArray(snapshot.items) || Object.keys(snapshot).some((key2) => !["items", "planning"].includes(key2))))
+      throw new TypeError("Invalid undo snapshot");
+    keys.add(entry.key);
+    if (JSON.stringify(breakdownSnapshot(state.months[entry.key])) !== JSON.stringify(entry.after))
+      throw new TypeError("Breakdown changed since replacement; undo rejected to protect newer work");
+  }
+  const result = structuredClone(state);
+  for (const { key: key2, before } of undo.entries) {
+    result.months[key2].items = structuredClone(before.items);
+    if (before.planning === void 0) delete result.months[key2].planning;
+    else result.months[key2].planning = structuredClone(before.planning);
+  }
+  if (!validateState(result).valid) throw new TypeError("Invalid undo result");
+  return result;
+}
+var REVIEW_FIELDS = ["income", "recurring", "balances", "unpaid"];
+function updateMonthReview(state, key2, field, checked) {
+  if (!validateState(state).valid || !Object.hasOwn(state.months, key2) || !REVIEW_FIELDS.includes(field) || typeof checked !== "boolean")
+    throw new TypeError("Invalid month review");
+  const result = structuredClone(state);
+  result.months[key2].reviewChecklist = { ...result.months[key2].reviewChecklist, [field]: checked };
   return result;
 }
 var record = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -20877,6 +21008,23 @@ function validateMonth(month) {
   if (!record(month)) {
     errors.push("Month must be an object");
     return result();
+  }
+  if (month.reviewChecklist !== void 0 && (!record(month.reviewChecklist) || Object.entries(month.reviewChecklist).some(([key2, value]) => !REVIEW_FIELDS.includes(key2) || typeof value !== "boolean")))
+    errors.push("Invalid month review checklist");
+  if (month.planning !== void 0) {
+    const p = month.planning;
+    if (!record(p) || !(p.source === null || monthKey(p.source)) || typeof p.ownChanges !== "boolean" || typeof p.boundary !== "boolean" || !Number.isSafeInteger(p.revision) || p.revision < 0)
+      errors.push("Invalid planning metadata");
+    if (record(p) && p.forwardItems !== void 0) {
+      if (!Array.isArray(p.forwardItems) || p.forwardItems.length > 1e3)
+        errors.push("Invalid forward plan size");
+      else {
+        const validation = validateMonth({ ...month, planning: void 0, items: p.forwardItems });
+        errors.push(...validation.errors.map((error) => `Forward plan: ${error}`));
+        if (p.forwardItems.some((item) => record(item) && (item.recurrence === "one-off" || item.paid !== false)))
+          errors.push("Forward plan must be recurring and unpaid");
+      }
+    }
   }
   if (!cents(month.salary))
     errors.push("Salary must be nonnegative integer cents");
@@ -20903,6 +21051,8 @@ function validateMonth(month) {
         errors.push(`${prefix} must be an object`);
         return;
       }
+      if (item.recurrence !== void 0 && !["recurring", "one-off"].includes(item.recurrence))
+        errors.push(`${prefix} recurrence is invalid`);
       if (!cents(item.amount))
         errors.push(`${prefix} amount must be nonnegative integer cents`);
       if (!CATEGORIES.includes(item.category))
@@ -21006,10 +21156,12 @@ function validateState(state) {
         ...validation.warnings.map((warning) => `${key2}: ${warning}`)
       );
       if (record(month)) {
+        if (record(month.planning) && month.planning.source !== null && (!Object.hasOwn(state.months, month.planning.source) || month.planning.source >= key2))
+          errors.push(`${key2}: Carry source must be an earlier saved month`);
         for (const id of [month.salaryAccount, month.motherAccount])
           if (!ids.has(id)) errors.push(`${key2}: Unknown account ${id}`);
         if (Array.isArray(month.items)) {
-          for (const item of month.items)
+          for (const item of [...month.items, ...Array.isArray(month.planning?.forwardItems) ? month.planning.forwardItems : []])
             if (record(item)) {
               for (const id of [item.from, item.to])
                 if (!ids.has(id)) errors.push(`${key2}: Unknown account ${id}`);
@@ -21094,7 +21246,7 @@ function mountBudget({
 }) {
   const root = document.querySelector("#workspace");
   const $2 = (s) => root.querySelector(s);
-  let alive = true, toastTimer;
+  let alive = true, toastTimer, replacementUndo = null;
   let state = structuredClone(initial), view = "budget", filter = "all", query = "", actuals = null, actualsMonth = null, actualsError = "", actualsLoading = false, actualsLoadingFor = null, actualsSeq = 0;
   const month = () => state.months[state.selected], cats = ["commitment", "entertainment", "savings"], title = (s) => s.charAt(0).toUpperCase() + s.slice(1), fmt = (n) => money(n).replace("RM ", ""), account = (id) => state.accounts.find((a) => a.id === id)?.name || id;
   function toast(text2) {
@@ -21115,8 +21267,14 @@ function mountBudget({
     }
     onChange(structuredClone(state));
   }
+  function clearModalHandlers() {
+    $2("#modal-content").querySelectorAll("*").forEach((node) => {
+      for (const event of ["onclick", "onsubmit", "onchange", "oninput"]) node[event] = null;
+    });
+  }
   function modal(html) {
     if (!alive) return;
+    clearModalHandlers();
     $2("#modal-content").innerHTML = html;
     $2("#modal").showModal();
     $2("#modal").querySelector("[data-close]")?.addEventListener("click", () => $2("#modal").close());
@@ -21125,6 +21283,16 @@ function mountBudget({
     return state.accounts.map(
       (a) => `<option value="${esc(a.id)}" ${a.id === selected ? "selected" : ""}>${esc(a.name)}</option>`
     ).join("");
+  }
+  function monthLabel(key2) {
+    return (/* @__PURE__ */ new Date(`${key2}-01T00:00:00Z`)).toLocaleDateString("en-GB", { month: "long", year: "numeric", timeZone: "UTC" });
+  }
+  function provenance(m) {
+    const p = m.planning;
+    return `${p ? p.source ? `Carried forward from ${monthLabel(p.source)}` : "Carry source not recorded" : "Carry source not recorded for this saved breakdown"}${p?.ownChanges ? " \xB7 Own changes in this month" : ""}`;
+  }
+  function reviewChecklist(m) {
+    return `<details class="review-note" id="month-review"><summary>Month-start review \xB7 optional</summary><p>Check these yourself when ready. Nothing here changes money, balances or paid flags.</p>${Object.entries({ income: "Confirm income", recurring: "Review recurring items", balances: "Enter opening balances if needed", unpaid: "Start unpaid" }).map(([key2, label]) => `<label class="check-label"><input type="checkbox" data-review="${key2}" ${m.reviewChecklist?.[key2] ? "checked" : ""}>${label}</label>`).join("")}<p>New months start with unpaid items and blank plan and actual opening balances. Checking a box only records your review.</p></details>`;
   }
   function render() {
     if (!alive) return;
@@ -21144,7 +21312,12 @@ function mountBudget({
       const share = s.net ? totals[c] / s.net * 100 : 0;
       return `<div class="category-card ${c}"><div class="category-top"><span><i class="cat-dot cat-${c}"></i>${title(c)}</span><span class="percent">${s.net ? share.toFixed(1) + "%" : "\u2014"}</span></div><div class="cat-value">${fmt(totals[c])}<small>MYR</small></div><div class="progress"><span style="width:${Math.min(100, share)}%"></span></div><div class="cat-caption"><span>Actual share of net income</span><span>Target ${m.targets[c]}%</span></div></div>`;
     }).join("")}</section>
- <div class="section-title"><div><h2>The monthly breakdown</h2><p>Every ringgit has a place. Make yours work for you.</p></div><button id="add-item" class="primary">\uFF0B Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items\u2026" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR \xB7 Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>\u2713 Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% \u2014 they are guidance, not spending limits.` : "Category percentages use income after Ibu\u2019s deduction."}</div>`;
+ <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">\uFF0B Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items\u2026" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR \xB7 Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>\u2713 Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% \u2014 they are guidance, not spending limits.` : "Category percentages use income after Ibu\u2019s deduction."}</div>`;
+    $2("#content").insertAdjacentHTML("beforeend", reviewChecklist(m));
+    root.querySelectorAll("[data-review]").forEach((input) => input.onchange = () => {
+      state = updateMonthReview(state, state.selected, input.dataset.review, input.checked);
+      save();
+    });
     $2("#edit-income").onclick = editIncome;
     $2("#income-button").onclick = editIncome;
     renderRows();
@@ -21165,7 +21338,7 @@ function mountBudget({
       (i) => (filter === "all" || i.category === filter) && i.name.toLowerCase().includes(query.toLowerCase())
     );
     $2("#rows").innerHTML = list.map(
-      (i) => `<tr><td><input class="paid-check" type="checkbox" aria-label="Mark ${esc(i.name)} paid" data-paid="${esc(i.id)}" ${i.paid ? "checked" : ""}></td><td><span class="item-name">${esc(i.name)}</span>${i.review ? `<span class="item-note">${i.amount === 0 ? "Amount needs review" : "Route needs review"}</span>` : ""}</td><td><span class="tag ${i.category === "entertainment" ? "orange" : i.category === "savings" ? "blue" : ""}">${title(i.category)}</span></td><td>${i.credit ? '<span class="tag pink">Credit card</span>' : ""} ${i.subscription ? '<span class="tag purple">Subscription</span>' : ""}${!i.credit && !i.subscription ? '<span class="item-note">Bank / cash</span>' : ""}</td><td class="route-cell">${esc(account(i.from))} <span>\u2192</span> ${esc(account(i.to))}</td><td class="money">${fmt(i.amount)}</td><td><button class="row-edit" data-edit="${esc(i.id)}" aria-label="Edit ${esc(i.name)}">\u2197</button></td></tr>`
+      (i) => `<tr><td><input class="paid-check" type="checkbox" aria-label="Mark ${esc(i.name)} paid" data-paid="${esc(i.id)}" ${i.paid ? "checked" : ""}></td><td><span class="item-name">${esc(i.name)}</span><span class="item-note">${i.recurrence === "one-off" ? "One-off" : "Recurring"}</span>${i.review ? `<span class="item-note">${i.amount === 0 ? "Amount needs review" : "Route needs review"}</span>` : ""}</td><td><span class="tag ${i.category === "entertainment" ? "orange" : i.category === "savings" ? "blue" : ""}">${title(i.category)}</span></td><td>${i.credit ? '<span class="tag pink">Credit card</span>' : ""} ${i.subscription ? '<span class="tag purple">Subscription</span>' : ""}${!i.credit && !i.subscription ? '<span class="item-note">Bank / cash</span>' : ""}</td><td class="route-cell">${esc(account(i.from))} <span>\u2192</span> ${esc(account(i.to))}</td><td class="money">${fmt(i.amount)}</td><td><button class="row-edit" data-edit="${esc(i.id)}" aria-label="Edit ${esc(i.name)}">\u2197</button></td></tr>`
     ).join("") || '<tr><td colspan="7" class="empty">No items match. Try a different search or add an item.</td></tr>';
     $2("#item-count").textContent = `${list.length} of ${month().items.length} items`;
     document.querySelectorAll("[data-edit]").forEach((b) => b.onclick = () => editItem(b.dataset.edit));
@@ -21396,6 +21569,51 @@ function mountBudget({
       render();
     };
   }
+  function replacementDialog() {
+    modal(`<h2>Replace later saved breakdowns?</h2><p class="subtitle">An explicit replacement, including future overrides. Only recurring source items are copied, and all target items start unpaid. One-offs are not copied.</p><label for="replacement-source">Replacement source month</label><select id="replacement-source">${Object.keys(state.months).sort().map((key2) => `<option value="${key2}" ${key2 === state.selected ? "selected" : ""}>${monthLabel(key2)}</option>`).join("")}</select><div id="replacement-preview"></div><p class="review-note">Income, Ibu, targets, plan and actual opening balances, funding transfers and recorded Activity stay unchanged. Source and earlier months stay unchanged.</p><label class="check-label"><input type="checkbox" id="replacement-consent">I understand this replaces the listed saved breakdowns</label><p class="form-error" id="replacement-error" role="alert"></p><div class="form-actions"><button data-close>Cancel</button><button id="confirm-replacement" class="primary" disabled>Replace listed breakdowns</button></div>`);
+    const update = () => {
+      const preview = previewLaterBreakdowns(state, $2("#replacement-source").value);
+      $2("#replacement-consent").checked = false;
+      $2("#confirm-replacement").disabled = true;
+      $2("#replacement-preview").innerHTML = `<h3>Source: ${monthLabel(preview.source)}</h3><p>${preview.items.length} recurring items \xB7 ${money(preview.items.reduce((sum, item) => sum + item.amount, 0))}</p><details><summary>Source item definitions</summary><ul>${preview.items.map((item) => `<li>${esc(item.name)} \xB7 ${money(item.amount)} \xB7 ${esc(title(item.category))} \xB7 ${esc(account(item.from))} \u2192 ${esc(account(item.to))}</li>`).join("") || "<li>Empty recurring breakdown</li>"}</ul></details><h3>${preview.targets.length} affected saved months</h3><ul>${preview.targets.map((target) => `<li>${monthLabel(target.key)}: ${target.beforeCount} items / ${money(target.beforeTotal)} \u2192 ${target.afterCount} items / ${money(target.afterTotal)}${target.ownChanges ? " \xB7 replaces own changes" : " \xB7 replaces saved plan (may include overrides)"}</li>`).join("") || "<li>No later saved months. Nothing will be replaced.</li>"}</ul>`;
+      $2("#replacement-consent").onchange = () => {
+        $2("#confirm-replacement").disabled = !$2("#replacement-consent").checked || !preview.targets.length;
+      };
+      $2("#replacement-error").textContent = "";
+    };
+    $2("#replacement-source").onchange = update;
+    update();
+    $2("#confirm-replacement").onclick = () => {
+      if (!$2("#replacement-consent").checked) return;
+      try {
+        const replacement = replaceLaterBreakdowns(state, $2("#replacement-source").value);
+        state = replacement.state;
+        replacementUndo = replacement.undo;
+        save();
+        $2("#modal").close();
+        render();
+        toast("Listed breakdowns replaced. Undo is available in Plan settings for this session.");
+      } catch (error) {
+        $2("#replacement-error").textContent = error.message;
+      }
+    };
+  }
+  function undoReplacementDialog() {
+    if (!replacementUndo) return;
+    modal(`<h2>Undo last breakdown replacement?</h2><p>Restore only these saved breakdowns: ${replacementUndo.entries.map((entry) => monthLabel(entry.key)).join(", ")}.</p><p class="review-note">Newer income, targets, balances, transfers and recorded Activity will stay unchanged. Undo is rejected if any listed breakdown changed since replacement.</p><p id="replacement-error" class="form-error" role="alert"></p><div class="form-actions"><button data-close>Cancel</button><button class="primary" id="confirm-undo-replacement">Undo listed replacement</button></div>`);
+    $2("#confirm-undo-replacement").onclick = () => {
+      try {
+        state = undoBreakdownReplacement(state, replacementUndo);
+        replacementUndo = null;
+        save();
+        $2("#modal").close();
+        render();
+        toast("Breakdowns restored. Other planning fields are unchanged.");
+      } catch (error) {
+        $2("#replacement-error").textContent = error.message;
+      }
+    };
+  }
   function renderSettings() {
     const m = month(), s = summarize(m), totals = categoryTotals(m);
     $2("#content").innerHTML = `<div class="title-row"><div><div class="eyebrow">YOUR PLAN, YOUR RULES</div><h1>Room to change your mind.</h1><p class="subtitle">Targets guide your plan. They never lock your spending amounts.</p></div></div><section class="panel settings-form"><h2>Category targets</h2><p class="subtitle" style="margin:10px 0 18px">Percentages are based on RM ${fmt(s.net)} after Ibu. Adjust them each month; they do not have to total 100%.</p><form id="targets-form">${cats.map((c) => `<label for="target-${c}">${title(c)} target (%)</label><input id="target-${c}" type="number" min="0" max="100" step="0.01" value="${m.targets[c]}" required>`).join("")}<p id="target-total" class="review-note">Targets total: ${s.targetTotal}%</p><div class="form-actions"><button type="button" id="match-actual">Use current actual shares</button><button class="primary">Save targets</button></div></form></section><section class="panel settings-form"><h2>Targets versus the plan</h2><div class="table-wrap"><table><thead><tr><th>Category</th><th>Target amount</th><th>Planned</th><th>Difference</th></tr></thead><tbody>${cats.map((c) => {
@@ -21403,7 +21621,10 @@ function mountBudget({
       return `<tr><td>${title(c)}</td><td>${money(target)}</td><td>${money(totals[c])}</td><td class="${target < totals[c] ? "negative" : ""}">${money(target - totals[c])}</td></tr>`;
     }).join(
       ""
-    )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">\u2193 Export backup</button> <button id="settings-import">\u2191 Import backup</button><p class="subtitle" style="margin-top:17px">New months copy your selected plan, reset payment checkmarks, and require fresh plan and actual opening balances. Changes never rewrite an existing month.</p></section>`;
+    )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">\u2193 Export backup</button> <button id="settings-import">\u2191 Import backup</button><p class="subtitle" style="margin-top:17px">New months inherit recurring items from the latest earlier saved month's forward plan (or start empty if none exists). One-offs never copy. This month only preserves the previous recurring baseline for future months, including months not created yet. Other plan settings copy the selected month; paid flags and both opening-balance maps reset. Onward edits stop at the first explicit override or different recurring plan. Provenance is recorded for new carries; legacy sources are not guessed. The optional month-start checklist records only your confirmations.</p></section>`;
+    $2("#content").insertAdjacentHTML("beforeend", `<section class="panel settings-form"><h2>Replace saved breakdowns</h2><p class="subtitle">Choose a source and review all later saved months before replacing their recurring items. This is never automatic.</p><button id="replace-breakdowns">Replace later breakdowns</button> <button id="undo-replacement" ${replacementUndo ? "" : "disabled"}>Undo last replacement</button><p class="review-note">Undo keeps only the latest replacement, up to 1.8 MB, in this open session. Reload, import, sign-out or loading another snapshot clears it. Export a backup for longer-term recovery. Conflicting item or paid edits block undo.</p></section>`);
+    $2("#replace-breakdowns").onclick = replacementDialog;
+    $2("#undo-replacement").onclick = undoReplacementDialog;
     $2("#targets-form").onsubmit = (e) => {
       e.preventDefault();
       m.targets = Object.fromEntries(
@@ -21435,7 +21656,7 @@ function mountBudget({
       note: ""
     };
     modal(
-      `<h2>${existing ? "A place for every ringgit." : "Give it a place."}</h2><p class="subtitle">Plan the amount, the category, and where it comes from.</p><form id="item-form"><label for="item-name">Item name</label><input id="item-name" maxlength="100" value="${esc(i.name)}" required><div class="two"><div><label for="item-amount">Amount (RM)</label><input id="item-amount" type="number" min="0" max="100000000" step="0.01" value="${i.amount / 100}" required></div><div><label for="item-category">Category</label><select id="item-category">${cats.map((c) => `<option value="${c}" ${c === i.category ? "selected" : ""}>${title(c)}</option>`).join("")}</select></div></div><div class="two"><div><label for="item-from">From account</label><select id="item-from">${options(i.from)}</select></div><div><label for="item-to">To account</label><select id="item-to">${options(i.to)}</select></div></div><label class="check-label"><input id="item-credit" type="checkbox" ${i.credit ? "checked" : ""}>Paid by credit card</label><label class="check-label"><input id="item-sub" type="checkbox" ${i.subscription ? "checked" : ""}>Monthly subscription</label><label class="check-label"><input id="item-review" type="checkbox" ${i.review ? "checked" : ""}>Needs review (amount or route)</label><label for="item-note">Notes</label><input id="item-note" maxlength="600" value="${esc(i.note)}"><div class="form-error" id="item-error"></div><div class="form-actions">${existing ? '<button class="danger" id="delete-item" type="button">Delete item</button>' : ""}<button type="button" data-close>Cancel</button><button class="primary">Save item</button></div></form>`
+      `<h2>${existing ? "A place for every ringgit." : "Give it a place."}</h2><p class="subtitle">Plan the amount, the category, and where it comes from.</p><form id="item-form"><label for="item-name">Item name</label><input id="item-name" maxlength="100" value="${esc(i.name)}" required><div class="two"><div><label for="item-amount">Amount (RM)</label><input id="item-amount" type="number" min="0" max="100000000" step="0.01" value="${i.amount / 100}" required></div><div><label for="item-category">Category</label><select id="item-category">${cats.map((c) => `<option value="${c}" ${c === i.category ? "selected" : ""}>${title(c)}</option>`).join("")}</select></div></div><div class="two"><div><label for="item-from">From account</label><select id="item-from">${options(i.from)}</select></div><div><label for="item-to">To account</label><select id="item-to">${options(i.to)}</select></div></div><label class="check-label"><input id="item-credit" type="checkbox" ${i.credit ? "checked" : ""}>Paid by credit card</label><label class="check-label"><input id="item-sub" type="checkbox" ${i.subscription ? "checked" : ""}>Monthly subscription</label><label class="check-label"><input id="item-review" type="checkbox" ${i.review ? "checked" : ""}>Needs review (amount or route)</label><label for="item-note">Notes</label><input id="item-note" maxlength="600" value="${esc(i.note)}"><label for="item-repeat">Repeat item</label><select id="item-repeat"><option value="recurring" ${i.recurrence !== "one-off" ? "selected" : ""}>Recurring</option><option value="one-off" ${i.recurrence === "one-off" ? "selected" : ""}>One-off</option></select><p class="review-note">One-offs stay in this month. This month only keeps the previous recurring plan for future months.</p><label for="item-scope">Apply changes to</label><select id="item-scope"><option value="onward">This month onward</option><option value="month">This month only</option></select><p class="review-note">Onward updates later matching recurring plans until the first explicit override or different plan. Paid checkmarks never carry forward.</p><div class="form-error" id="item-error" role="alert"></div><div class="form-actions">${existing ? '<button class="danger" id="delete-item" type="button">Delete item</button>' : ""}<button type="button" data-close>Cancel</button><button class="primary">Save item</button></div></form>`
     );
     $2("#item-form").onsubmit = (e) => {
       e.preventDefault();
@@ -21455,10 +21676,15 @@ function mountBudget({
         credit: $2("#item-credit").checked,
         subscription: $2("#item-sub").checked,
         review: $2("#item-review").checked,
+        recurrence: $2("#item-repeat").value,
         note: $2("#item-note").value.trim()
       };
-      if (existing) m.items[m.items.indexOf(existing)] = updated;
-      else m.items.push(updated);
+      try {
+        state = updateMonthItems(state, state.selected, existing ? m.items.map((item) => item.id === existing.id ? updated : item) : [...m.items, updated], { scope: $2("#item-scope").value });
+      } catch (error) {
+        $2("#item-error").textContent = `Unable to save item: ${error.message}. Nothing changed. Export a backup and load the latest plan before retrying; if this persists, request help checking planning limits.`;
+        return;
+      }
       save();
       $2("#modal").close();
       render();
@@ -21468,10 +21694,15 @@ function mountBudget({
       $2("#delete-item").onclick = () => {
         $2("#modal").close();
         modal(
-          `<h2>Remove ${esc(existing.name)}?</h2><p class="subtitle">This removes the item from this month only.</p><div class="form-actions"><button data-close>Keep item</button><button class="primary" id="confirm-delete">Confirm deletion</button></div>`
+          `<h2>Remove ${esc(existing.name)}?</h2><p class="subtitle">Choose where to remove this item. Onward stops at the first explicit override or different recurring plan; earlier months never change.</p><label for="delete-scope">Apply deletion to</label><select id="delete-scope"><option value="onward">This month onward</option><option value="month">This month only</option></select><div id="item-error" class="form-error" role="alert"></div><div class="form-actions"><button data-close>Keep item</button><button class="primary" id="confirm-delete">Confirm deletion</button></div>`
         );
         $2("#confirm-delete").onclick = () => {
-          m.items = m.items.filter((x) => x.id !== id);
+          try {
+            state = updateMonthItems(state, state.selected, m.items.filter((x) => x.id !== id), { scope: $2("#delete-scope").value });
+          } catch (error) {
+            $2("#item-error").textContent = `Unable to delete item: ${error.message}. Nothing changed. Export a backup and load the latest plan before retrying; if this persists, request help checking planning limits.`;
+            return;
+          }
           save();
           $2("#modal").close();
           render();
@@ -21508,6 +21739,7 @@ function mountBudget({
       $2("#replace-backup").onclick = () => {
         if (!alive) return;
         state = data;
+        replacementUndo = null;
         filter = "all";
         query = "";
         save();
@@ -21559,9 +21791,8 @@ function mountBudget({
         dialog.close();
         toast("Budget data changed. Please reopen the editor.");
       }
-      dialog.querySelectorAll("*").forEach((node) => {
-        node.onclick = node.onsubmit = null;
-      });
+      clearModalHandlers();
+      replacementUndo = null;
       $2("#modal-content").replaceChildren();
       state = structuredClone(next);
       actualsSeq++;
