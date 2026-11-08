@@ -4,6 +4,11 @@ import {
   categoryTotals,
   routes,
   nextMonth,
+  updateMonthItems,
+  updateMonthReview,
+  previewLaterBreakdowns,
+  replaceLaterBreakdowns,
+  undoBreakdownReplacement,
   validateState,
   money,
 } from "./model.mjs";
@@ -28,7 +33,7 @@ export function mountBudget({
 }) {
   const root = document.querySelector("#workspace");
   const $ = s => root.querySelector(s);
-  let alive = true, toastTimer;
+  let alive = true, toastTimer, replacementUndo = null;
   let state = structuredClone(initial),
     view = "budget",
     filter = "all",
@@ -60,8 +65,14 @@ export function mountBudget({
     }
     onChange(structuredClone(state));
   }
+  function clearModalHandlers() {
+    $('#modal-content').querySelectorAll('*').forEach(node => {
+      for (const event of ['onclick', 'onsubmit', 'onchange', 'oninput']) node[event] = null;
+    });
+  }
   function modal(html) {
     if (!alive) return;
+    clearModalHandlers();
     $("#modal-content").innerHTML = html;
     $("#modal").showModal();
     $("#modal")
@@ -75,6 +86,16 @@ export function mountBudget({
           `<option value="${esc(a.id)}" ${a.id === selected ? "selected" : ""}>${esc(a.name)}</option>`,
       )
       .join("");
+  }
+  function monthLabel(key) {
+    return new Date(`${key}-01T00:00:00Z`).toLocaleDateString('en-GB', {month:'long', year:'numeric', timeZone:'UTC'});
+  }
+  function provenance(m) {
+    const p = m.planning;
+    return `${p ? (p.source ? `Carried forward from ${monthLabel(p.source)}` : 'Carry source not recorded') : 'Carry source not recorded for this saved breakdown'}${p?.ownChanges ? ' · Own changes in this month' : ''}`;
+  }
+  function reviewChecklist(m) {
+    return `<details class="review-note" id="month-review"><summary>Month-start review · optional</summary><p>Check these yourself when ready. Nothing here changes money, balances or paid flags.</p>${Object.entries({income:'Confirm income', recurring:'Review recurring items', balances:'Enter opening balances if needed', unpaid:'Start unpaid'}).map(([key,label]) => `<label class="check-label"><input type="checkbox" data-review="${key}" ${m.reviewChecklist?.[key] ? 'checked' : ''}>${label}</label>`).join('')}<p>New months start with unpaid items and blank plan and actual opening balances. Checking a box only records your review.</p></details>`;
   }
   function render() {
     if (!alive) return;
@@ -106,7 +127,12 @@ export function mountBudget({
      return `<div class="category-card ${c}"><div class="category-top"><span><i class="cat-dot cat-${c}"></i>${title(c)}</span><span class="percent">${s.net ? share.toFixed(1) + "%" : "—"}</span></div><div class="cat-value">${fmt(totals[c])}<small>MYR</small></div><div class="progress"><span style="width:${Math.min(100, share)}%"></span></div><div class="cat-caption"><span>Actual share of net income</span><span>Target ${m.targets[c]}%</span></div></div>`;
    })
    .join("")}</section>
- <div class="section-title"><div><h2>The monthly breakdown</h2><p>Every ringgit has a place. Make yours work for you.</p></div><button id="add-item" class="primary">＋ Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items…" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR · Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>✓ Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% — they are guidance, not spending limits.` : "Category percentages use income after Ibu’s deduction."}</div>`;
+ <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">＋ Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items…" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR · Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>✓ Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% — they are guidance, not spending limits.` : "Category percentages use income after Ibu’s deduction."}</div>`;
+    $('#content').insertAdjacentHTML('beforeend', reviewChecklist(m));
+    root.querySelectorAll('[data-review]').forEach(input => input.onchange = () => {
+      state = updateMonthReview(state, state.selected, input.dataset.review, input.checked);
+      save();
+    });
     $("#edit-income").onclick = editIncome;
     $("#income-button").onclick = editIncome;
     renderRows();
@@ -133,7 +159,7 @@ export function mountBudget({
       list
         .map(
           (i) =>
-            `<tr><td><input class="paid-check" type="checkbox" aria-label="Mark ${esc(i.name)} paid" data-paid="${esc(i.id)}" ${i.paid ? "checked" : ""}></td><td><span class="item-name">${esc(i.name)}</span>${i.review ? `<span class="item-note">${i.amount === 0 ? "Amount needs review" : "Route needs review"}</span>` : ""}</td><td><span class="tag ${i.category === "entertainment" ? "orange" : i.category === "savings" ? "blue" : ""}">${title(i.category)}</span></td><td>${i.credit ? '<span class="tag pink">Credit card</span>' : ""} ${i.subscription ? '<span class="tag purple">Subscription</span>' : ""}${!i.credit && !i.subscription ? '<span class="item-note">Bank / cash</span>' : ""}</td><td class="route-cell">${esc(account(i.from))} <span>→</span> ${esc(account(i.to))}</td><td class="money">${fmt(i.amount)}</td><td><button class="row-edit" data-edit="${esc(i.id)}" aria-label="Edit ${esc(i.name)}">↗</button></td></tr>`,
+            `<tr><td><input class="paid-check" type="checkbox" aria-label="Mark ${esc(i.name)} paid" data-paid="${esc(i.id)}" ${i.paid ? "checked" : ""}></td><td><span class="item-name">${esc(i.name)}</span><span class="item-note">${i.recurrence === 'one-off' ? 'One-off' : 'Recurring'}</span>${i.review ? `<span class="item-note">${i.amount === 0 ? "Amount needs review" : "Route needs review"}</span>` : ""}</td><td><span class="tag ${i.category === "entertainment" ? "orange" : i.category === "savings" ? "blue" : ""}">${title(i.category)}</span></td><td>${i.credit ? '<span class="tag pink">Credit card</span>' : ""} ${i.subscription ? '<span class="tag purple">Subscription</span>' : ""}${!i.credit && !i.subscription ? '<span class="item-note">Bank / cash</span>' : ""}</td><td class="route-cell">${esc(account(i.from))} <span>→</span> ${esc(account(i.to))}</td><td class="money">${fmt(i.amount)}</td><td><button class="row-edit" data-edit="${esc(i.id)}" aria-label="Edit ${esc(i.name)}">↗</button></td></tr>`,
         )
         .join("") ||
       '<tr><td colspan="7" class="empty">No items match. Try a different search or add an item.</td></tr>';
@@ -421,6 +447,45 @@ export function mountBudget({
       render();
     };
   }
+  function replacementDialog() {
+    modal(`<h2>Replace later saved breakdowns?</h2><p class="subtitle">An explicit replacement, including future overrides. Only recurring source items are copied, and all target items start unpaid. One-offs are not copied.</p><label for="replacement-source">Replacement source month</label><select id="replacement-source">${Object.keys(state.months).sort().map(key => `<option value="${key}" ${key === state.selected ? 'selected' : ''}>${monthLabel(key)}</option>`).join('')}</select><div id="replacement-preview"></div><p class="review-note">Income, Ibu, targets, plan and actual opening balances, funding transfers and recorded Activity stay unchanged. Source and earlier months stay unchanged.</p><label class="check-label"><input type="checkbox" id="replacement-consent">I understand this replaces the listed saved breakdowns</label><p class="form-error" id="replacement-error" role="alert"></p><div class="form-actions"><button data-close>Cancel</button><button id="confirm-replacement" class="primary" disabled>Replace listed breakdowns</button></div>`);
+    const update = () => {
+      const preview = previewLaterBreakdowns(state, $('#replacement-source').value);
+      $('#replacement-consent').checked = false;
+      $('#confirm-replacement').disabled = true;
+      $('#replacement-preview').innerHTML = `<h3>Source: ${monthLabel(preview.source)}</h3><p>${preview.items.length} recurring items · ${money(preview.items.reduce((sum,item) => sum + item.amount, 0))}</p><details><summary>Source item definitions</summary><ul>${preview.items.map(item => `<li>${esc(item.name)} · ${money(item.amount)} · ${esc(title(item.category))} · ${esc(account(item.from))} → ${esc(account(item.to))}</li>`).join('') || '<li>Empty recurring breakdown</li>'}</ul></details><h3>${preview.targets.length} affected saved months</h3><ul>${preview.targets.map(target => `<li>${monthLabel(target.key)}: ${target.beforeCount} items / ${money(target.beforeTotal)} → ${target.afterCount} items / ${money(target.afterTotal)}${target.ownChanges ? ' · replaces own changes' : ' · replaces saved plan (may include overrides)'}</li>`).join('') || '<li>No later saved months. Nothing will be replaced.</li>'}</ul>`;
+      $('#replacement-consent').onchange = () => { $('#confirm-replacement').disabled = !$('#replacement-consent').checked || !preview.targets.length; };
+      $('#replacement-error').textContent = '';
+    };
+    $('#replacement-source').onchange = update;
+    update();
+    $('#confirm-replacement').onclick = () => {
+      if (!$('#replacement-consent').checked) return;
+      try {
+        const replacement = replaceLaterBreakdowns(state, $('#replacement-source').value);
+        state = replacement.state;
+        replacementUndo = replacement.undo;
+        save();
+        $('#modal').close();
+        render();
+        toast('Listed breakdowns replaced. Undo is available in Plan settings for this session.');
+      } catch (error) { $('#replacement-error').textContent = error.message; }
+    };
+  }
+  function undoReplacementDialog() {
+    if (!replacementUndo) return;
+    modal(`<h2>Undo last breakdown replacement?</h2><p>Restore only these saved breakdowns: ${replacementUndo.entries.map(entry => monthLabel(entry.key)).join(', ')}.</p><p class="review-note">Newer income, targets, balances, transfers and recorded Activity will stay unchanged. Undo is rejected if any listed breakdown changed since replacement.</p><p id="replacement-error" class="form-error" role="alert"></p><div class="form-actions"><button data-close>Cancel</button><button class="primary" id="confirm-undo-replacement">Undo listed replacement</button></div>`);
+    $('#confirm-undo-replacement').onclick = () => {
+      try {
+        state = undoBreakdownReplacement(state, replacementUndo);
+        replacementUndo = null;
+        save();
+        $('#modal').close();
+        render();
+        toast('Breakdowns restored. Other planning fields are unchanged.');
+      } catch (error) { $('#replacement-error').textContent = error.message; }
+    };
+  }
   function renderSettings() {
     const m = month(),
       s = summarize(m),
@@ -433,7 +498,10 @@ export function mountBudget({
         })
         .join(
           "",
-        )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">↓ Export backup</button> <button id="settings-import">↑ Import backup</button><p class="subtitle" style="margin-top:17px">New months copy your selected plan, reset payment checkmarks, and require fresh plan and actual opening balances. Changes never rewrite an existing month.</p></section>`;
+        )}</tbody></table></div><p class="subtitle" style="margin-top:15px">Positive difference means room below the target. Negative means above it. Unallocated income is not automatically relabelled as savings.</p></section><section class="panel settings-form"><h2>Your data stays with you.</h2><p class="subtitle" style="margin:10px 0 17px">Saved to your signed-in cloud account when the status confirms it. Pending edits may be cached in this browser. Backups contain private budget data; keep them out of the public repository.</p><button id="settings-export">↓ Export backup</button> <button id="settings-import">↑ Import backup</button><p class="subtitle" style="margin-top:17px">New months inherit recurring items from the latest earlier saved month's forward plan (or start empty if none exists). One-offs never copy. This month only preserves the previous recurring baseline for future months, including months not created yet. Other plan settings copy the selected month; paid flags and both opening-balance maps reset. Onward edits stop at the first explicit override or different recurring plan. Provenance is recorded for new carries; legacy sources are not guessed. The optional month-start checklist records only your confirmations.</p></section>`;
+    $('#content').insertAdjacentHTML('beforeend', `<section class="panel settings-form"><h2>Replace saved breakdowns</h2><p class="subtitle">Choose a source and review all later saved months before replacing their recurring items. This is never automatic.</p><button id="replace-breakdowns">Replace later breakdowns</button> <button id="undo-replacement" ${replacementUndo ? '' : 'disabled'}>Undo last replacement</button><p class="review-note">Undo keeps only the latest replacement, up to 1.8 MB, in this open session. Reload, import, sign-out or loading another snapshot clears it. Export a backup for longer-term recovery. Conflicting item or paid edits block undo.</p></section>`);
+    $('#replace-breakdowns').onclick = replacementDialog;
+    $('#undo-replacement').onclick = undoReplacementDialog;
     $("#targets-form").onsubmit = (e) => {
       e.preventDefault();
       m.targets = Object.fromEntries(
@@ -470,7 +538,7 @@ export function mountBudget({
         note: "",
       };
     modal(
-      `<h2>${existing ? "A place for every ringgit." : "Give it a place."}</h2><p class="subtitle">Plan the amount, the category, and where it comes from.</p><form id="item-form"><label for="item-name">Item name</label><input id="item-name" maxlength="100" value="${esc(i.name)}" required><div class="two"><div><label for="item-amount">Amount (RM)</label><input id="item-amount" type="number" min="0" max="100000000" step="0.01" value="${i.amount / 100}" required></div><div><label for="item-category">Category</label><select id="item-category">${cats.map((c) => `<option value="${c}" ${c === i.category ? "selected" : ""}>${title(c)}</option>`).join("")}</select></div></div><div class="two"><div><label for="item-from">From account</label><select id="item-from">${options(i.from)}</select></div><div><label for="item-to">To account</label><select id="item-to">${options(i.to)}</select></div></div><label class="check-label"><input id="item-credit" type="checkbox" ${i.credit ? "checked" : ""}>Paid by credit card</label><label class="check-label"><input id="item-sub" type="checkbox" ${i.subscription ? "checked" : ""}>Monthly subscription</label><label class="check-label"><input id="item-review" type="checkbox" ${i.review ? "checked" : ""}>Needs review (amount or route)</label><label for="item-note">Notes</label><input id="item-note" maxlength="600" value="${esc(i.note)}"><div class="form-error" id="item-error"></div><div class="form-actions">${existing ? '<button class="danger" id="delete-item" type="button">Delete item</button>' : ""}<button type="button" data-close>Cancel</button><button class="primary">Save item</button></div></form>`,
+      `<h2>${existing ? "A place for every ringgit." : "Give it a place."}</h2><p class="subtitle">Plan the amount, the category, and where it comes from.</p><form id="item-form"><label for="item-name">Item name</label><input id="item-name" maxlength="100" value="${esc(i.name)}" required><div class="two"><div><label for="item-amount">Amount (RM)</label><input id="item-amount" type="number" min="0" max="100000000" step="0.01" value="${i.amount / 100}" required></div><div><label for="item-category">Category</label><select id="item-category">${cats.map((c) => `<option value="${c}" ${c === i.category ? "selected" : ""}>${title(c)}</option>`).join("")}</select></div></div><div class="two"><div><label for="item-from">From account</label><select id="item-from">${options(i.from)}</select></div><div><label for="item-to">To account</label><select id="item-to">${options(i.to)}</select></div></div><label class="check-label"><input id="item-credit" type="checkbox" ${i.credit ? "checked" : ""}>Paid by credit card</label><label class="check-label"><input id="item-sub" type="checkbox" ${i.subscription ? "checked" : ""}>Monthly subscription</label><label class="check-label"><input id="item-review" type="checkbox" ${i.review ? "checked" : ""}>Needs review (amount or route)</label><label for="item-note">Notes</label><input id="item-note" maxlength="600" value="${esc(i.note)}"><label for="item-repeat">Repeat item</label><select id="item-repeat"><option value="recurring" ${i.recurrence !== 'one-off' ? 'selected' : ''}>Recurring</option><option value="one-off" ${i.recurrence === 'one-off' ? 'selected' : ''}>One-off</option></select><p class="review-note">One-offs stay in this month. This month only keeps the previous recurring plan for future months.</p><label for="item-scope">Apply changes to</label><select id="item-scope"><option value="onward">This month onward</option><option value="month">This month only</option></select><p class="review-note">Onward updates later matching recurring plans until the first explicit override or different plan. Paid checkmarks never carry forward.</p><div class="form-error" id="item-error" role="alert"></div><div class="form-actions">${existing ? '<button class="danger" id="delete-item" type="button">Delete item</button>' : ""}<button type="button" data-close>Cancel</button><button class="primary">Save item</button></div></form>`,
     );
     $("#item-form").onsubmit = (e) => {
       e.preventDefault();
@@ -490,10 +558,17 @@ export function mountBudget({
         credit: $("#item-credit").checked,
         subscription: $("#item-sub").checked,
         review: $("#item-review").checked,
+        recurrence: $("#item-repeat").value,
         note: $("#item-note").value.trim(),
       };
-      if (existing) m.items[m.items.indexOf(existing)] = updated;
-      else m.items.push(updated);
+      try {
+        state = updateMonthItems(state, state.selected, existing
+          ? m.items.map((item) => item.id === existing.id ? updated : item)
+          : [...m.items, updated], {scope: $("#item-scope").value});
+      } catch (error) {
+        $("#item-error").textContent = `Unable to save item: ${error.message}. Nothing changed. Export a backup and load the latest plan before retrying; if this persists, request help checking planning limits.`;
+        return;
+      }
       save();
       $("#modal").close();
       render();
@@ -503,10 +578,15 @@ export function mountBudget({
       $("#delete-item").onclick = () => {
         $("#modal").close();
         modal(
-          `<h2>Remove ${esc(existing.name)}?</h2><p class="subtitle">This removes the item from this month only.</p><div class="form-actions"><button data-close>Keep item</button><button class="primary" id="confirm-delete">Confirm deletion</button></div>`,
+          `<h2>Remove ${esc(existing.name)}?</h2><p class="subtitle">Choose where to remove this item. Onward stops at the first explicit override or different recurring plan; earlier months never change.</p><label for="delete-scope">Apply deletion to</label><select id="delete-scope"><option value="onward">This month onward</option><option value="month">This month only</option></select><div id="item-error" class="form-error" role="alert"></div><div class="form-actions"><button data-close>Keep item</button><button class="primary" id="confirm-delete">Confirm deletion</button></div>`,
         );
         $("#confirm-delete").onclick = () => {
-          m.items = m.items.filter((x) => x.id !== id);
+          try {
+            state = updateMonthItems(state, state.selected, m.items.filter((x) => x.id !== id), {scope: $("#delete-scope").value});
+          } catch (error) {
+            $("#item-error").textContent = `Unable to delete item: ${error.message}. Nothing changed. Export a backup and load the latest plan before retrying; if this persists, request help checking planning limits.`;
+            return;
+          }
           save();
           $("#modal").close();
           render();
@@ -545,6 +625,7 @@ export function mountBudget({
       $("#replace-backup").onclick = () => {
         if (!alive) return;
         state = data;
+        replacementUndo = null;
         filter = "all";
         query = "";
         save();
@@ -599,7 +680,8 @@ export function mountBudget({
         dialog.close();
         toast("Budget data changed. Please reopen the editor.");
       }
-      dialog.querySelectorAll("*").forEach(node => { node.onclick = node.onsubmit = null; });
+      clearModalHandlers();
+      replacementUndo = null;
       $("#modal-content").replaceChildren();
       state = structuredClone(next);
       actualsSeq++;
