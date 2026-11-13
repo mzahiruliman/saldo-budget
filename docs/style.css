@@ -472,7 +472,33 @@ h2 {
   border-radius: 10px;
   overflow: hidden;
 }
+.breakdown-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.breakdown-sort {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font-size: 11px;
+  white-space: nowrap;
+}
+.breakdown-sort select {
+  width: auto;
+  max-width: 100%;
+  margin: 0;
+  padding: 8px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: #fff;
+  color: var(--green);
+}
 .toolbar {
+  flex-wrap: wrap;
   display: flex;
   justify-content: space-between;
   align-items: center;

@@ -27,6 +27,54 @@ async function open(page,context,setup=()=>{}){
  await page.goto('/saldo-budget/');await expect(page.locator('#save-status')).toContainText('Ready');
  return ()=>structuredClone(row.payload);
 }
+phoneTest('monthly breakdown name sorting is display-only and works with filters',async({page,context})=>{
+ const writes=[];page.on('request',r=>{if(new URL(r.url()).pathname==='/rest/v1/rpc/save_budget')writes.push(r.postDataJSON());});
+ const saved=await open(page,context,state=>{
+  const m=state.months[state.selected],item=m.items[0];
+  m.items=[{...item,id:'z',name:'Zulu',amount:200},{...item,id:'a',name:'alpha',amount:1000},{...item,id:'b',name:'Bravo',amount:50,category:'savings'}];
+ });
+ const before=saved(),names=()=>page.locator('#rows .item-name').allTextContents();
+ const sort=page.getByLabel('Sort monthly breakdown');
+ await expect(sort).toHaveValue('original');
+ await sort.selectOption('name-asc');expect(await names()).toEqual(['alpha','Bravo','Zulu']);
+ await sort.selectOption('name-desc');expect(await names()).toEqual(['Zulu','Bravo','alpha']);
+ await page.locator('[data-filter="commitment"]').click();
+ await expect(sort).toHaveValue('name-desc');expect(await names()).toEqual(['Zulu','alpha']);
+ await page.getByLabel('Search budget items').fill('alpha');expect(await names()).toEqual(['alpha']);
+ await page.getByLabel('Search budget items').fill('missing');await expect(page.locator('#rows')).toContainText('No items match');
+ await page.getByLabel('Search budget items').fill('');
+ await page.locator('[data-filter="all"]').click();
+ await sort.selectOption('original');expect(await names()).toEqual(['Zulu','alpha','Bravo']);
+ expect(saved()).toEqual(before);expect(writes).toHaveLength(0);
+ const geometry=await sort.evaluate(el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,width:innerWidth,overflow:document.documentElement.scrollWidth>innerWidth};});
+ expect(geometry.left).toBeGreaterThanOrEqual(0);expect(geometry.right).toBeLessThanOrEqual(geometry.width);expect(geometry.overflow).toBe(false);
+});
+phoneTest('monthly breakdown amount sorting uses numeric cents and keeps item actions correct',async({page,context,engine})=>{
+ const writes=[];page.on('request',r=>{if(new URL(r.url()).pathname==='/rest/v1/rpc/save_budget')writes.push(r.postDataJSON());});
+ const saved=await open(page,context,state=>{
+  const m=state.months[state.selected],item=m.items[0];
+  m.items=[{...item,id:'z',name:'Zulu',amount:200},{...item,id:'a',name:'alpha',amount:1000},{...item,id:'b',name:'Bravo',amount:0},{...item,id:'t',name:'Tie',amount:200}];
+ });
+ const before=saved(),names=()=>page.locator('#rows .item-name').allTextContents(),sort=page.getByLabel('Sort monthly breakdown');
+ await sort.selectOption('amount-asc');expect(await names()).toEqual(['Bravo','Zulu','Tie','alpha']);
+ await sort.selectOption('amount-desc');expect(await names()).toEqual(['alpha','Zulu','Tie','Bravo']);
+ expect(writes).toHaveLength(0);expect(saved()).toEqual(before);
+ await page.getByLabel('Mark Zulu paid').check();await expect(page.locator('#save-status')).toContainText('Saved');
+ expect(saved().months['2026-10'].items.find(i=>i.id==='z').paid).toBe(true);
+ expect(saved().months['2026-10'].items.map(i=>i.id)).toEqual(['z','a','b','t']);
+ await page.getByRole('button',{name:'Edit Zulu',exact:true}).click();await page.getByLabel('Amount (RM)',{exact:true}).fill('20');
+ await page.getByLabel('Apply changes to').selectOption('month');await page.getByRole('button',{name:'Save item',exact:true}).click();
+ await expect(page.locator('#save-status')).toContainText('Saved');expect(await names()).toEqual(['Zulu','alpha','Tie','Bravo']);
+ await page.getByRole('button',{name:'Add item',exact:false}).click();await page.getByLabel('Item name').fill('New zero');
+ await page.getByLabel('Apply changes to').selectOption('month');await page.getByRole('button',{name:'Save item',exact:true}).click();
+ await expect(page.locator('#save-status')).toContainText('Saved');expect(await names()).toEqual(['Zulu','alpha','Tie','Bravo','New zero']);
+ await page.locator('[data-view="settings"]').click();await page.locator('[data-view="budget"]').click();await expect(sort).toHaveValue('amount-desc');
+ await page.locator('#month-next').click();await expect(sort).toHaveValue('amount-desc');await expect(page.locator('#save-status')).toContainText('Saved');
+ await page.reload();await expect(page.locator('#save-status')).toContainText('Ready');await expect(sort).toHaveValue('original');
+ await sort.selectOption('amount-desc');
+ await page.locator('.toolbar').scrollIntoViewIfNeeded();await page.screenshot({path:`verification/monthly-breakdown/sorting-${engine}.png`});
+ await page.setViewportSize({width:1280,height:900});await sort.selectOption('amount-asc');await expect(page.locator('#rows .item-name').first()).toHaveText('Synthetic rent');
+});
 function phoneTest(name, run) {
  for (const engine of ['chromium','webkit']) test(`${name} ${engine}`, async ({playwright}) => {
   const browser = await playwright[engine].launch({headless:true,args:engine==='chromium'?['--no-sandbox']:[]});
