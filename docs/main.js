@@ -21247,7 +21247,7 @@ function mountBudget({
   const root = document.querySelector("#workspace");
   const $2 = (s) => root.querySelector(s);
   let alive = true, toastTimer, replacementUndo = null;
-  let state = structuredClone(initial), view = "budget", filter = "all", query = "", actuals = null, actualsMonth = null, actualsError = "", actualsLoading = false, actualsLoadingFor = null, actualsSeq = 0;
+  let state = structuredClone(initial), view = "budget", filter = "all", query = "", sort = "original", actuals = null, actualsMonth = null, actualsError = "", actualsLoading = false, actualsLoadingFor = null, actualsSeq = 0;
   const month = () => state.months[state.selected], cats = ["commitment", "entertainment", "savings"], title = (s) => s.charAt(0).toUpperCase() + s.slice(1), fmt = (n) => money(n).replace("RM ", ""), account = (id) => state.accounts.find((a) => a.id === id)?.name || id;
   function toast(text2) {
     if (!alive) return;
@@ -21312,7 +21312,7 @@ function mountBudget({
       const share = s.net ? totals[c] / s.net * 100 : 0;
       return `<div class="category-card ${c}"><div class="category-top"><span><i class="cat-dot cat-${c}"></i>${title(c)}</span><span class="percent">${s.net ? share.toFixed(1) + "%" : "\u2014"}</span></div><div class="cat-value">${fmt(totals[c])}<small>MYR</small></div><div class="progress"><span style="width:${Math.min(100, share)}%"></span></div><div class="cat-caption"><span>Actual share of net income</span><span>Target ${m.targets[c]}%</span></div></div>`;
     }).join("")}</section>
- <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">\uFF0B Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items\u2026" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR \xB7 Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>\u2713 Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% \u2014 they are guidance, not spending limits.` : "Category percentages use income after Ibu\u2019s deduction."}</div>`;
+ <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">\uFF0B Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><div class="breakdown-controls"><label class="breakdown-sort">Sort by<select id="breakdown-sort" aria-label="Sort monthly breakdown">${[["original", "Original order"], ["name-asc", "Name: A\u2013Z"], ["name-desc", "Name: Z\u2013A"], ["amount-asc", "Amount: low to high"], ["amount-desc", "Amount: high to low"]].map(([value, label]) => `<option value="${value}" ${sort === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><input class="search" aria-label="Search budget items" placeholder="Search your items\u2026" value="${esc(query)}"></div></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR \xB7 Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>\u2713 Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% \u2014 they are guidance, not spending limits.` : "Category percentages use income after Ibu\u2019s deduction."}</div>`;
     $2("#content").insertAdjacentHTML("beforeend", reviewChecklist(m));
     root.querySelectorAll("[data-review]").forEach((input) => input.onchange = () => {
       state = updateMonthReview(state, state.selected, input.dataset.review, input.checked);
@@ -21328,6 +21328,10 @@ function mountBudget({
         render();
       }
     );
+    $2("#breakdown-sort").onchange = (e) => {
+      sort = e.target.value;
+      renderRows();
+    };
     $2(".search").oninput = (e) => {
       query = e.target.value;
       renderRows();
@@ -21337,6 +21341,13 @@ function mountBudget({
     const list = month().items.filter(
       (i) => (filter === "all" || i.category === filter) && i.name.toLowerCase().includes(query.toLowerCase())
     );
+    if (sort === "name-asc" || sort === "name-desc") {
+      const direction = sort === "name-asc" ? 1 : -1;
+      list.sort((a, b) => direction * a.name.localeCompare(b.name, "en", { sensitivity: "base", numeric: true }));
+    } else if (sort === "amount-asc" || sort === "amount-desc") {
+      const direction = sort === "amount-asc" ? 1 : -1;
+      list.sort((a, b) => direction * (a.amount - b.amount));
+    }
     $2("#rows").innerHTML = list.map(
       (i) => `<tr><td><input class="paid-check" type="checkbox" aria-label="Mark ${esc(i.name)} paid" data-paid="${esc(i.id)}" ${i.paid ? "checked" : ""}></td><td><span class="item-name">${esc(i.name)}</span><span class="item-note">${i.recurrence === "one-off" ? "One-off" : "Recurring"}</span>${i.review ? `<span class="item-note">${i.amount === 0 ? "Amount needs review" : "Route needs review"}</span>` : ""}</td><td><span class="tag ${i.category === "entertainment" ? "orange" : i.category === "savings" ? "blue" : ""}">${title(i.category)}</span></td><td>${i.credit ? '<span class="tag pink">Credit card</span>' : ""} ${i.subscription ? '<span class="tag purple">Subscription</span>' : ""}${!i.credit && !i.subscription ? '<span class="item-note">Bank / cash</span>' : ""}</td><td class="route-cell">${esc(account(i.from))} <span>\u2192</span> ${esc(account(i.to))}</td><td class="money">${fmt(i.amount)}</td><td><button class="row-edit" data-edit="${esc(i.id)}" aria-label="Edit ${esc(i.name)}">\u2197</button></td></tr>`
     ).join("") || '<tr><td colspan="7" class="empty">No items match. Try a different search or add an item.</td></tr>';

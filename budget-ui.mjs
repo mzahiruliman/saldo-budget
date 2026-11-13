@@ -38,6 +38,7 @@ export function mountBudget({
     view = "budget",
     filter = "all",
     query = "",
+    sort = "original",
     actuals = null,
     actualsMonth = null,
     actualsError = "",
@@ -127,7 +128,7 @@ export function mountBudget({
      return `<div class="category-card ${c}"><div class="category-top"><span><i class="cat-dot cat-${c}"></i>${title(c)}</span><span class="percent">${s.net ? share.toFixed(1) + "%" : "—"}</span></div><div class="cat-value">${fmt(totals[c])}<small>MYR</small></div><div class="progress"><span style="width:${Math.min(100, share)}%"></span></div><div class="cat-caption"><span>Actual share of net income</span><span>Target ${m.targets[c]}%</span></div></div>`;
    })
    .join("")}</section>
- <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">＋ Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><input class="search" aria-label="Search budget items" placeholder="Search your items…" value="${esc(query)}"></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR · Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>✓ Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% — they are guidance, not spending limits.` : "Category percentages use income after Ibu’s deduction."}</div>`;
+ <div class="section-title"><div><h2>The monthly breakdown</h2><p data-provenance>${esc(provenance(m))}</p></div><button id="add-item" class="primary">＋ Add item</button></div><section class="ledger"><div class="toolbar"><div class="tabs">${["all", ...cats].map((c) => `<button data-filter="${c}" class="${filter === c ? "selected" : ""}">${c === "all" ? "All items" : title(c)}</button>`).join("")}</div><div class="breakdown-controls"><label class="breakdown-sort">Sort by<select id="breakdown-sort" aria-label="Sort monthly breakdown">${[["original","Original order"],["name-asc","Name: A–Z"],["name-desc","Name: Z–A"],["amount-asc","Amount: low to high"],["amount-desc","Amount: high to low"]].map(([value,label]) => `<option value="${value}" ${sort === value ? "selected" : ""}>${label}</option>`).join("")}</select></label><input class="search" aria-label="Search budget items" placeholder="Search your items…" value="${esc(query)}"></div></div><div class="table-wrap"><table><thead><tr><th style="width:40px">Paid</th><th>Item / purpose</th><th>Category</th><th>Payment type</th><th>Money route</th><th>Amount (RM)</th><th></th></tr></thead><tbody id="rows"></tbody></table></div><div class="table-footer"><span id="item-count"></span><span>All amounts in MYR · Check cloud status</span></div></section><div class="legend"><span><i class="dot"></i>Pink = paid by credit card</span><span><i class="dot purple"></i>Purple = monthly subscription</span><span>✓ Check an item when paid</span></div><div class="review-note"><strong>Your plan, your choices.</strong> Import your existing backup to migrate. Account routes and balances are planning inputs, not verified bank transactions. ${Math.abs(s.targetTotal - 100) > 0.01 ? `Your targets add up to ${s.targetTotal}% — they are guidance, not spending limits.` : "Category percentages use income after Ibu’s deduction."}</div>`;
     $('#content').insertAdjacentHTML('beforeend', reviewChecklist(m));
     root.querySelectorAll('[data-review]').forEach(input => input.onchange = () => {
       state = updateMonthReview(state, state.selected, input.dataset.review, input.checked);
@@ -144,6 +145,10 @@ export function mountBudget({
           render();
         }),
     );
+    $("#breakdown-sort").onchange = (e) => {
+      sort = e.target.value;
+      renderRows();
+    };
     $(".search").oninput = (e) => {
       query = e.target.value;
       renderRows();
@@ -155,6 +160,13 @@ export function mountBudget({
         (filter === "all" || i.category === filter) &&
         i.name.toLowerCase().includes(query.toLowerCase()),
     );
+    if (sort === "name-asc" || sort === "name-desc") {
+      const direction = sort === "name-asc" ? 1 : -1;
+      list.sort((a, b) => direction * a.name.localeCompare(b.name, "en", {sensitivity: "base", numeric: true}));
+    } else if (sort === "amount-asc" || sort === "amount-desc") {
+      const direction = sort === "amount-asc" ? 1 : -1;
+      list.sort((a, b) => direction * (a.amount - b.amount));
+    }
     $("#rows").innerHTML =
       list
         .map(
